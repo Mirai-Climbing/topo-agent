@@ -1,0 +1,13 @@
+[project]
+name = "topo-agent"
+version = "0.1.0"
+description = "Mirai Climbing のトポエージェント(ボルダリングの写真から、同じ課題のホールドを探す)"
+requires-python = ">=3.10"
+license = "AGPL-3.0-or-later"
+dependencies = ["pillow"]
+
+[project.optional-dependencies]
+gemini = ["google-genai"]
+
+[tool.setuptools]
+packages = ["topo_agent", "topo_agent.baseline"]
