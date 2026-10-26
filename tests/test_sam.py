@@ -54,7 +54,8 @@ class SamTest(unittest.TestCase):
         self.assertEqual(content[0], {"type": "input_text", "text": "climbing hold"})
         self.assertTrue(content[1]["image_url"].startswith("data:image/jpeg;base64,"))
         self.assertEqual(body["metadata"]["include_confidence"], "true")  # 文字列で送る(Meta の決まり)
-        self.assertEqual(sam.point_prompt(0.5, 0.25, 1600, 1200), "<|point;x=800;y=300;w=1600;h=1200|>")
+        self.assertIs(body["store"], False)  # Meta 側に残さない
+        self.assertEqual(sam.point_prompt(0.5, 0.25, 1600, 1200), "<0f>1<|point;x=800;y=300;w=1600;h=1200|>")
 
     def test_parse_and_candidates(self):
         text = "<0f>" + ",".join(record(i, b) for i, b in enumerate(HOLDS))

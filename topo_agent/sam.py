@@ -48,8 +48,8 @@ def shrink(jpeg, side=SEND_SIDE):
 
 
 def point_prompt(x, y, w, h):
-    """押した所(割合)を、SAM の点の記号にする。"""
-    return f"<|point;x={round(x * w)};y={round(y * h)};w={w};h={h}|>"
+    """押した所(割合)を、SAM の点の記号にする(絵の番号 <0f> と、物の番号 1 を前に付ける決まり)。"""
+    return f"<0f>1<|point;x={round(x * w)};y={round(y * h)};w={w};h={h}|>"
 
 
 def request_body(jpeg, prompt, model=MODEL):
@@ -58,7 +58,8 @@ def request_body(jpeg, prompt, model=MODEL):
     return {"model": model,
             "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt},
                                                    {"type": "input_image", "image_url": url}]}],
-            "metadata": {"include_confidence": "true", "mask_encoding": "one_bit"}}
+            "metadata": {"include_confidence": "true", "mask_encoding": "one_bit"},
+            "store": False}  # Meta 側に答えを残さない(何も言わないと残す)
 
 
 def output_text(response):
