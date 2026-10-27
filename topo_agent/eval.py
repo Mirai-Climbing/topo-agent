@@ -8,7 +8,12 @@
 
 難しい見本の壁(--bench、topo_agent/baseline/bench.py):描いた絵なので、外の AI に送ってよい。
 
-    python -m topo_agent.eval --bench --methods color,gemini
+    python -m topo_agent.eval --bench --methods color,gemini,sam_color,meta
+
+- color      色だけ(ハッカソン前。AI なし)
+- gemini     Gemini のエージェント(ハッカソン前)
+- sam_color  SAM 3.1 の候補を、色だけで絞る(AI の判断なし)
+- meta       トポエージェント(SAM 3.1 + Muse Spark)
 
 本物の課題(アプリのデータベース)で測るのは、mirai-climbing-v2 の server/hold_eval.py(同意した人の課題だけを外の AI に送る)。
 """
@@ -56,13 +61,15 @@ def match(truth, found, width, height):
 
 def finders(env, names):
     """測る方法の名前 → 関数(JPEG, point → 候補の並び)。設定がなくて使えない方法は外す。"""
+    from topo_agent.agent import meta_hold_finder, sam_color_finder
     from topo_agent.baseline.gemini_agent import color_only, gemini_hold_finder
 
     def color(jpeg, point):
         with Image.open(io.BytesIO(jpeg)) as img:
             return color_only(img.convert("RGB"), point)
 
-    made = {"color": lambda: color, "gemini": lambda: gemini_hold_finder(env)}
+    made = {"color": lambda: color, "gemini": lambda: gemini_hold_finder(env),
+            "sam_color": lambda: sam_color_finder(env), "meta": lambda: meta_hold_finder(env)}
     out = {}
     for name in names:
         f = made[name]() if name in made else None
@@ -115,30 +122,38 @@ def by_scene(rows):
     return out
 
 
-def bench(env, names):
+def bench(env, names, scenes=None, seeds=(11, 12)):
     from topo_agent.baseline import bench as hold_bench
     methods = finders(env, names)
     if not methods:
         sys.exit("使える方法がありません")
-    rows = evaluate(hold_bench.items(), methods)
+    rows = evaluate(hold_bench.items(scenes or hold_bench.NAMES, seeds), methods)
+    for r in rows:
+        print(f"{r['problem']:<10} {r['method']:<9} 答え{r['truth']:>3}  見つけた{r['found']:>3}  当たり{r['hits']:>3}"
+              f"  {r['seconds']:>5}秒  {r['error']}", flush=True)
+    print()
     for scene, per in by_scene(rows).items():
         for name, s in per.items():
-            print(f"{scene:<8} {name:<7} 見つけた割合 {s['recall']:>4.0%}  当たりの割合 {s['precision']:>4.0%}"
+            print(f"{scene:<8} {name:<9} 見つけた割合 {s['recall']:>4.0%}  当たりの割合 {s['precision']:>4.0%}"
                   f"  平均 {s['seconds']}秒  エラー {s['errors']}")
     print()
     for name, s in summary(rows).items():
-        print(f"{'合計':<7} {name:<7} 見つけた割合 {s['recall']:>4.0%}  当たりの割合 {s['precision']:>4.0%}"
+        print(f"{'合計':<7} {name:<9} 見つけた割合 {s['recall']:>4.0%}  当たりの割合 {s['precision']:>4.0%}"
               f"  平均 {s['seconds']}秒  エラー {s['errors']}")
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="ホールド探しの点数を測る")
-    ap.add_argument("--methods", default="color", help="color,gemini から(カンマで区切る)")
+    ap.add_argument("--methods", default="color", help="color,gemini,sam_color,meta から(カンマで区切る)")
     ap.add_argument("--bench", action="store_true", help="難しい見本の壁(topo_agent/baseline/bench.py)で測る")
+    ap.add_argument("--scenes", default="", help="見本の壁の場面だけを測る(カンマで区切る。light,twins など)")
+    ap.add_argument("--seeds", default="11,12", help="見本の壁の seed(カンマで区切る)")
     a = ap.parse_args(argv)
     if not a.bench:
         sys.exit("今は --bench だけです(本物の課題は mirai-climbing-v2 の server/hold_eval.py)")
-    bench(dict(os.environ), [x.strip() for x in a.methods.split(",") if x.strip()])
+    names = [x.strip() for x in a.scenes.split(",") if x.strip()] or None
+    seeds = tuple(int(x) for x in a.seeds.split(",") if x.strip())
+    bench(dict(os.environ), [x.strip() for x in a.methods.split(",") if x.strip()], names, seeds)
 
 
 if __name__ == "__main__":
