@@ -162,6 +162,12 @@ class AgentTest(unittest.TestCase):
             holds = agent.meta_hold_finder({}, on_trace=traces.append)(jpeg, tap)
         self.assertEqual(len(holds), 2)  # Muse Spark failed: SAM candidates filtered by color
         self.assertEqual(traces[0][-1]["tool"], "(fallback: sam_color)")
+        self.assertEqual(traces[0][0]["tool"], "(sam)")  # the SAM step comes first, with the candidate count
+        self.assertEqual(traces[0][0]["args"], {"count": 3})
+        per_call = []
+        with mock.patch.object(sam, "http_post", lambda env: post),                 mock.patch.object(agent, "http_chat", lambda env: broken):
+            agent.meta_hold_finder({})(jpeg, tap, on_trace=per_call.extend)  # steps per request, for the app
+        self.assertEqual(per_call[0]["tool"], "(sam)")
         with mock.patch.object(sam, "http_post", lambda env: broken), \
                 mock.patch.object(agent, "http_chat", lambda env: broken):
             holds = agent.meta_hold_finder({}, on_trace=traces.append)(jpeg, tap)

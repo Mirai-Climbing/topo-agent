@@ -469,14 +469,16 @@ def sam_color_finder(env):
 
 def meta_hold_finder(env, on_trace=None):
     """Find holds with the topo agent (SAM 3.1 + Muse Spark): (JPEG, point → holds), or None without a key.
-    Pass on_trace(trace) to receive the steps (to show them in the app)."""
+    Pass on_trace(trace) here, or to each call as find(jpeg, point, on_trace=...), to receive the steps
+    (to show them in the app). The first step is SAM: {"tool": "(sam)", "args": {"count": candidates}, "ms"}."""
     post, chat = sam_mod.http_post(env), http_chat(env)
     if not (post and chat):
         return None
     sam = sam_mod.Sam(post)
     model_call = chat_call(chat, env.get("META_AGENT_MODEL", MODEL), env.get("META_AGENT_EFFORT", EFFORT))
 
-    def find(jpeg, point):
+    def find(jpeg, point, on_trace=on_trace):
+        started = time.monotonic()
         try:
             img, cands, tap_id = prepare(sam, jpeg, point)
         except Exception as err:  # SAM did not answer: color only (pre-hackathon method)
@@ -488,7 +490,10 @@ def meta_hold_finder(env, on_trace=None):
                 on_trace([{"tool": "(error)", "result": f"{type(err).__name__}: {str(err)[:200]}"},
                           {"tool": "(fallback: color)", "args": {"count": len(holds)}}])
             return holds
+        sam_step = {"tool": "(sam)", "args": {"count": len(cands)}, "ms": round((time.monotonic() - started) * 1000)}
         if tap_id is None:
+            if on_trace:
+                on_trace([sam_step])
             return []
         try:
             ids, trace = run_agent(model_call, img, cands, tap_id)
@@ -498,6 +503,7 @@ def meta_hold_finder(env, on_trace=None):
         if ids is None:
             ids = [c["id"] for c in sam_color(cands, tap_id)]
             trace.append({"tool": "(fallback: sam_color)", "args": {"count": len(ids)}})
+        trace = [sam_step] + trace
         log.info("topo agent: %s", json.dumps(trace, ensure_ascii=False))
         if on_trace:
             on_trace(trace)
