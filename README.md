@@ -7,6 +7,24 @@ Snap a photo of the wall and tap one hold. **SAM 3.1** outlines every hold, then
 to inspect, compare and zoom in, and picks only the holds that belong to the same problem.
 The resulting topo becomes a problem that climbers can share in [Mirai Climbing](https://mirai-climbing.com/), a climbing app.
 
+![What most climbers see, the same wall with red-green color blindness (simulated), and the problem outlined by the topo agent](docs/images/colorblind.png)
+
+## Why we built it
+
+**In a bouldering gym, a problem is its color.** All holds of one problem share a color (or a piece of tape), and
+that is how climbers know which holds they may use. But color vision deficiency is common: red-green types affect up
+to about 8% of men of Northern European descent and about 4–6.5% of Japanese and Chinese men
+([review](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12385717/)), roughly one man in twenty in Japan.
+So any busy gym has climbers for whom red and orange, or red and green, look nearly the same, and who have to ask
+someone which holds belong to a problem.
+
+The topo agent does the color work for them. Tap one hold, and the whole problem is outlined, so the problem is
+visible without telling colors apart. The same topo is then shared with other climbers in the app, so nobody has to
+mark the same problem twice.
+
+Mirai Climbing started as a way to find climbing partners. Partner finding alone is a small market, so we moved to
+topos: something every climber uses every session, and a shared problem is a natural way for climbers to meet.
+
 ## Why an agent?
 
 In a gym, one problem is marked by holds of the same color, or by tape of the same color next to holds of any color.
