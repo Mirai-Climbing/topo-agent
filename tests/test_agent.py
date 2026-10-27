@@ -55,6 +55,21 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(agent.tapped_candidate(cands, {"x": 230 / W, "y": 225 / H}, W, H)["id"], 0)
         self.assertIsNone(agent.tapped_candidate(cands, {"x": 0.9, "y": 0.9}, W, H))
 
+    def test_linked_and_table(self):
+        cands = candidates()
+        far = dict(cands[1], id=3, x=0.95, y=0.95)  # same purple, but across the wall (more than LINK away)
+        cands.append(far)
+        self.assertEqual(agent.linked_ids(cands, 0, W, H), {0, 1})  # the far purple is not chained to the tap
+        tools = agent.Tools(wall(), cands, 0)
+        rows = tools.table().splitlines()
+        self.assertEqual(rows[0], "id | color | color_distance | x | y | size | linked")
+        self.assertTrue(rows[1].startswith("0* | purple | 0.0 |"))  # the tapped one first, marked with *
+        self.assertTrue(rows[1].endswith("| yes"))
+        self.assertTrue(next(r for r in rows if r.startswith("3 |")).endswith("| no"))
+        similar = {s["id"]: s for s in tools.find_similar(0)["similar"]}
+        self.assertTrue(similar[1]["linked_to_tapped"])
+        self.assertFalse(similar[3]["linked_to_tapped"])
+
     def test_agent_uses_tools_then_submits(self):
         model, seen = scripted(
             [{"name": "inspect_candidates", "args": {"ids": [0]}}, {"name": "find_similar", "args": {"id": 0}}],
@@ -65,9 +80,10 @@ class AgentTest(unittest.TestCase):
         self.assertEqual([t["tool"] for t in trace if t["tool"] != "(model)"],
                          ["inspect_candidates", "find_similar", "look_closer", "submit_holds"])
         self.assertTrue(all("ms" in t for t in trace))
-        first = seen[0][1]["content"]  # the photo and the numbered candidates
-        self.assertEqual([p["type"] for p in first], ["text", "image_url", "image_url"])
+        first = seen[0][1]["content"]  # the photo, the numbered candidates and a close-up of the tapped hold
+        self.assertEqual([p["type"] for p in first], ["text", "image_url", "image_url", "image_url"])
         self.assertIn("candidate 0", first[0]["text"])
+        self.assertIn("id | color | color_distance", first[0]["text"])  # the candidate table comes up front
         tool_msgs = [m for m in seen[1] if m["role"] == "tool"]
         self.assertEqual([m["tool_call_id"] for m in tool_msgs], ["c1_0", "c1_1"])  # results go to their calls
         self.assertIn('"purple"', tool_msgs[0]["content"])
@@ -112,6 +128,9 @@ class AgentTest(unittest.TestCase):
                                         {"id": "call_2", "name": "look_closer", "args": {}}])
         self.assertEqual(out["raw"]["tool_calls"][0]["id"], "call_1")
         self.assertIs(sent[0]["store"], False)
+        self.assertEqual(sent[0]["reasoning_effort"], agent.EFFORT)
+        agent.chat_call(lambda body: sent.append(body) or reply, effort="")([])
+        self.assertNotIn("reasoning_effort", sent[1])  # empty effort: the API default
         self.assertEqual({t["function"]["name"] for t in sent[0]["tools"]},
                          {"inspect_candidates", "find_similar", "look_closer", "submit_holds"})
 
