@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""SAM 3.1 の呼び方と答えの読み方(topo_agent/sam.py)を、偽の Meta Model API で確かめる(本物にはつながない)。"""
+"""Calling SAM 3.1 and reading its output (topo_agent/sam.py), with a fake Meta Model API (no network)."""
 import io
 import unittest
 
@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw
 from topo_agent import sam
 
 W, H = 800, 600
-HOLDS = [(200, 200, 260, 250), (330, 260, 360, 285), (400, 200, 430, 225)]  # 楕円の箱(画素)
+HOLDS = [(200, 200, 260, 250), (330, 260, 360, 285), (400, 200, 430, 225)]  # ellipse boxes (pixels)
 
 
 def wall_jpeg():
@@ -23,7 +23,7 @@ def wall_jpeg():
 
 
 def record(i, box, w=W, h=H, conf=0.9):
-    """本物と同じ形の1つの物(箱の中だけの形を、Meta の符号で書く)。"""
+    """One object in the real format (a box-local mask in Meta's encoding)."""
     x1, y1, x2, y2 = box
     mw, mh = x2 - x1 + 1, y2 - y1 + 1
     m = Image.new("1", (mw, mh), 0)
@@ -35,7 +35,7 @@ def record(i, box, w=W, h=H, conf=0.9):
 
 
 def fake_api(lines_by_prompt):
-    """prompt(言葉)ごとに決まった答えを返す偽の API。受け取った中身も残す。"""
+    """A fake API answering per prompt. Keeps the request bodies."""
     seen = []
 
     def post(body):
@@ -53,8 +53,8 @@ class SamTest(unittest.TestCase):
         content = body["input"][0]["content"]
         self.assertEqual(content[0], {"type": "input_text", "text": "climbing hold"})
         self.assertTrue(content[1]["image_url"].startswith("data:image/jpeg;base64,"))
-        self.assertEqual(body["metadata"]["include_confidence"], "true")  # 文字列で送る(Meta の決まり)
-        self.assertIs(body["store"], False)  # Meta 側に残さない
+        self.assertEqual(body["metadata"]["include_confidence"], "true")  # a string, as Meta requires
+        self.assertIs(body["store"], False)  # not kept at Meta
         self.assertEqual(sam.point_prompt(0.5, 0.25, 1600, 1200), "<0f>1<|point;x=800;y=300;w=1600;h=1200|>")
 
     def test_parse_and_candidates(self):
@@ -64,23 +64,23 @@ class SamTest(unittest.TestCase):
         self.assertEqual(objs[1]["box"], (330, 260, 360, 285))
         self.assertAlmostEqual(objs[0]["conf"], 0.9)
         c = sam.to_candidate(objs[0])
-        self.assertAlmostEqual(c["x"], 230 / W, delta=0.003)  # 形の真ん中を、写真の割合で
+        self.assertAlmostEqual(c["x"], 230 / W, delta=0.003)  # mask center as a fraction of the photo
         self.assertAlmostEqual(c["y"], 225 / H, delta=0.003)
         self.assertAlmostEqual(c["r"], 30 / W, delta=0.002)
         self.assertGreaterEqual(len(c["points"]), 6)
         self.assertLessEqual(len(c["points"]), sam.MAX_POINTS)
-        self.assertTrue(all(200 / W - 0.01 <= x <= 260 / W + 0.01 for x, _ in c["points"]))  # 輪郭は箱の中
-        self.assertEqual(sam.parse(""), [])  # 1つもないのも正しい答え
+        self.assertTrue(all(200 / W - 0.01 <= x <= 260 / W + 0.01 for x, _ in c["points"]))  # outline stays in the box
+        self.assertEqual(sam.parse(""), [])  # no match is a valid answer
 
     def test_candidates_merge_concepts(self):
         hold = "<0f>" + ",".join(record(i, b) for i, b in enumerate(HOLDS[:2]))
-        volume = "<0f>" + record(5, HOLDS[1], conf=0.5) + "," + record(7, HOLDS[2])  # 1つは同じ物の重なり
+        volume = "<0f>" + record(5, HOLDS[1], conf=0.5) + "," + record(7, HOLDS[2])  # one duplicates a hold
         post, seen = fake_api({"climbing hold": hold, "climbing volume": volume})
         jpeg = wall_jpeg()
         found = sam.Sam(post).candidates(jpeg)
         self.assertEqual(len(seen), 2)
         self.assertEqual(len(found), 3)
-        self.assertEqual([c["id"] for c in found], [0, 1, 2])  # 番号は付け直す
+        self.assertEqual([c["id"] for c in found], [0, 1, 2])  # renumbered
 
     def test_point_prompt_returns_one_shape(self):
         post, seen = fake_api({sam.point_prompt(0.2875, 0.375, W, H): "<0f>" + record(0, HOLDS[0])})

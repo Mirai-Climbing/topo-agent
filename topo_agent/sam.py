@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""SAM 3.1(Meta Model API)で、写真のホールドを1つずつ切り出す。
+"""Segment every hold in a photo with SAM 3.1 (Meta Model API).
 
-- 言葉で頼む("climbing hold" など):写真の中の、その言葉に当たる物を全部(箱と形)
-- 点で頼む(押した所):そこにある物1つの形
+- Concept prompt ("climbing hold", ...): every instance of that concept in the photo (box and mask)
+- Point prompt (the tapped spot): the mask of the one object there
 
-Meta Model API の Responses(POST /v1/responses、model "sam-3.1")を使う。答えは特殊な記号の文字列で、
-1行が1枚の絵(写真なら <0f> の1行)。1つの物が「番号<|box;...|><|mask;...|>」で、カンマで並ぶ。
-形(mask)は箱の中だけの小さな白黒の絵で、Meta の meta-sam-parser で元に戻す。
+Uses the Responses API of Meta Model API (POST /v1/responses, model "sam-3.1"). The output is special-token text,
+one line per frame (a photo is the single line <0f>). Each object is "id<|box;...|><|mask;...|>", comma separated.
+A mask is a small binary raster covering only its box, decoded with Meta's meta-sam-parser.
 
-返す候補は、ほかと同じ割合の形({"x", "y", "r", "points"}、r は写真の幅に対する半径)に、
-id(SAM の番号)・conf(確からしさ)・area(写真に対する面積の割合)を足した物。
+Candidates use the same fractional shape as the rest of the app ({"x", "y", "r", "points"}, r is the radius
+relative to the photo width), plus id (SAM object id), conf (confidence) and area (fraction of the photo).
 
-鍵(MODEL_API_KEY)は環境変数から読む。写真は送るだけで、残さない。
+The key (MODEL_API_KEY) is read from the environment. Photos are only sent, never kept (store: false).
 """
 import base64
 import io
@@ -24,10 +24,10 @@ from topo_agent.baseline.shape import _simplify, _trace
 
 API = "https://api.meta.ai/v1"
 MODEL = "sam-3.1"
-SEND_SIDE = 1600  # SAM に送る写真の長い辺(画素)
-CONCEPTS = ("climbing hold", "climbing volume")  # 言葉で頼むときの言葉(ハリボテも別に頼む)
-MAX_POINTS = 32  # 輪郭の点の数の上限
-SAME = 0.6  # 2つの候補が、この割合以上重なったら同じ物とする
+SEND_SIDE = 1600  # long side of the photo sent to SAM (pixels)
+CONCEPTS = ("climbing hold", "climbing volume")  # concept prompts (volumes are asked for separately)
+MAX_POINTS = 32  # max points per outline
+SAME = 0.6  # two candidates overlapping this much are the same object
 
 _FRAME = re.compile(r"<(\d+)f>")
 _RECORD = re.compile(r"(?P<id>\d+)<\|box;(?P<box>[^|]*)\|><\|mask;(?P<mask>.*?)\|>(?=,\d+<\|box;|\s*$)")
@@ -38,7 +38,7 @@ def _kv(s):
 
 
 def shrink(jpeg, side=SEND_SIDE):
-    """送る大きさの JPEG と、その幅・高さ。"""
+    """JPEG resized for sending, with its width and height."""
     with Image.open(io.BytesIO(jpeg)) as raw:
         img = raw.convert("RGB")
     img.thumbnail((side, side))
@@ -48,22 +48,22 @@ def shrink(jpeg, side=SEND_SIDE):
 
 
 def point_prompt(x, y, w, h):
-    """押した所(割合)を、SAM の点の記号にする(絵の番号 <0f> と、物の番号 1 を前に付ける決まり)。"""
+    """The tapped spot (fractions) as a SAM point prompt (must be prefixed with the frame <0f> and an object id)."""
     return f"<0f>1<|point;x={round(x * w)};y={round(y * h)};w={w};h={h}|>"
 
 
 def request_body(jpeg, prompt, model=MODEL):
-    """Responses API に送る中身。prompt は言葉か、point_prompt の記号。"""
+    """Responses API request body. prompt is a noun phrase or a point_prompt."""
     url = "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()
     return {"model": model,
             "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt},
                                                    {"type": "input_image", "image_url": url}]}],
             "metadata": {"include_confidence": "true", "mask_encoding": "one_bit"},
-            "store": False}  # Meta 側に答えを残さない(何も言わないと残す)
+            "store": False}  # do not keep the response at Meta (the default is to keep it)
 
 
 def output_text(response):
-    """Responses API の答え(JSON)から、出力の文字列を取り出す。"""
+    """The output text of a Responses API response (JSON)."""
     if isinstance(response.get("output_text"), str):
         return response["output_text"]
     parts = []
@@ -75,8 +75,8 @@ def output_text(response):
 
 
 def parse(text):
-    """出力の文字列 → 物の並び [{"id", "frame", "box": (x1, y1, x2, y2), "w", "h", "conf", "mask": (H, W, payload)}]。
-    1つも見つからなければ空(空の答えも正しい答え)。"""
+    """Output text → objects [{"id", "frame", "box": (x1, y1, x2, y2), "w", "h", "conf", "mask": (H, W, payload)}].
+    Empty when nothing matched (an empty output is a valid answer)."""
     out = []
     for line in text.splitlines():
         line = line.strip()
@@ -98,7 +98,7 @@ def parse(text):
 
 
 def decode(mask):
-    """形の記号 → 行ごとの 0/1 の並び(高さ H、幅 W)。"""
+    """Mask token → rows of 0/1 (height H, width W)."""
     from meta_sam_parser import SegmentationMask, decode_mask_to_raster
     mh, mw, payload = mask
     encoding = "one_bit" if payload.startswith("!") else "lossless"
@@ -107,7 +107,7 @@ def decode(mask):
 
 
 def to_candidate(obj):
-    """SAM の物1つ → 候補(割合)。形が空なら None。形は箱の中だけの絵なので、箱の位置に戻す。"""
+    """One SAM object → candidate (fractions), None if the mask is empty. The mask covers only its box, so place it there."""
     rows = decode(obj["mask"])
     mh, mw = len(rows), len(rows[0]) if rows else 0
     x1, y1, x2, y2 = obj["box"]
@@ -128,7 +128,7 @@ def to_candidate(obj):
 
 
 def _overlap(a, b):
-    """2つの箱(割合)の重なり ÷ 小さいほうの面積。"""
+    """Intersection of two boxes (fractions) divided by the smaller box area."""
     ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
     iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
     small = min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1])) or 1e-9
@@ -136,7 +136,7 @@ def _overlap(a, b):
 
 
 def merge(groups):
-    """いくつかの頼み方の候補をまとめる(同じ物が重なっていたら、確からしいほうを残す)。番号は付け直す。"""
+    """Merge candidates from several prompts (keep the more confident of overlapping duplicates). Ids are renumbered."""
     out = []
     for c in sorted((c for g in groups for c in g), key=lambda c: -(c["conf"] or 0)):
         if all(_overlap(c["box"], o["box"]) < SAME for o in out):
@@ -147,30 +147,30 @@ def merge(groups):
 
 
 class Sam:
-    """Meta Model API の SAM 3.1。post(body) → 答えの JSON(テストでは偽物を渡す)。"""
+    """SAM 3.1 on Meta Model API. post(body) → response JSON (tests pass a fake)."""
 
     def __init__(self, post):
         self.post = post
 
     def segment(self, jpeg, prompt):
-        """jpeg(送る大きさにした物)を prompt で切り出した候補の並び。"""
+        """Candidates for prompt on jpeg (already resized for sending)."""
         objs = parse(output_text(self.post(request_body(jpeg, prompt))))
         return [c for c in (to_candidate(o) for o in objs) if c]
 
     def candidates(self, jpeg, concepts=CONCEPTS):
-        """写真の中のホールドの候補を全部(言葉ごとに頼んで、まとめる)。"""
+        """All hold candidates in the photo (one request per concept, merged)."""
         small, _, _ = shrink(jpeg)
         return merge([self.segment(small, c) for c in concepts])
 
     def at(self, jpeg, point):
-        """押した所(割合)のホールドの形。なければ None。"""
+        """The hold at the tapped spot (fractions), or None."""
         small, w, h = shrink(jpeg)
         found = self.segment(small, point_prompt(point["x"], point["y"], w, h))
         return max(found, key=lambda c: c["conf"] or 0) if found else None
 
 
 def http_post(env, timeout=60):
-    """本物の Meta Model API に送る関数。鍵がなければ None。"""
+    """A function posting to the real Meta Model API, or None without a key."""
     key = env.get("MODEL_API_KEY")
     if not key:
         return None
@@ -187,14 +187,14 @@ def http_post(env, timeout=60):
 
 
 if __name__ == "__main__":
-    # 試す:python -m topo_agent.sam 写真.jpg [言葉 | x,y(割合)]
+    # Try it: python -m topo_agent.sam photo.jpg [noun phrase | x,y (fractions)]
     import os
     import sys
     if len(sys.argv) < 2:
-        sys.exit("使い方:python -m topo_agent.sam 写真.jpg [言葉 | x,y]")
+        sys.exit("usage: python -m topo_agent.sam photo.jpg [noun phrase | x,y]")
     post = http_post(dict(os.environ))
     if not post:
-        sys.exit("MODEL_API_KEY がありません")
+        sys.exit("MODEL_API_KEY is not set")
     sam = Sam(post)
     jpeg = open(sys.argv[1], "rb").read()
     arg = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -206,4 +206,4 @@ if __name__ == "__main__":
         found = sam.segment(small, arg) if arg else sam.candidates(jpeg)
     print(json.dumps([{k: c[k] for k in ("id", "x", "y", "r", "conf", "area")} for c in found if c],
                      ensure_ascii=False, indent=1))
-    print(f"{len([c for c in found if c])} 個", file=sys.stderr)
+    print(f"{len([c for c in found if c])} found", file=sys.stderr)

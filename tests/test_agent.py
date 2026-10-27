@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""トポエージェント(topo_agent/agent.py)を、偽の SAM と偽の Muse Spark で確かめる(Meta にはつながない)。"""
+"""The topo agent (topo_agent/agent.py), with a fake SAM and a fake Muse Spark (no network)."""
 import io
 import unittest
+from unittest import mock
 
 from PIL import Image, ImageDraw
 
@@ -33,7 +34,7 @@ def candidates():
 
 
 def scripted(*replies):
-    """決まった順に道具を呼ぶ偽のモデル。受け取ったメッセージも残す。"""
+    """A fake model calling tools in a fixed order. Keeps the messages it received."""
     seen = []
 
     def call(messages):
@@ -50,7 +51,7 @@ class AgentTest(unittest.TestCase):
         self.assertEqual([agent.color_name(c["hsv"]) for c in cands], ["purple", "purple", "blue"])
         self.assertLess(agent.color_distance(cands[0]["hsv"], cands[1]["hsv"]), agent.SIMILAR)
         self.assertGreater(agent.color_distance(cands[0]["hsv"], cands[2]["hsv"]), agent.SIMILAR)
-        self.assertEqual([c["id"] for c in agent.sam_color(cands, 0)], [0, 1])  # 色だけなら紫の2つ
+        self.assertEqual([c["id"] for c in agent.sam_color(cands, 0)], [0, 1])  # color alone: the two purples
         self.assertEqual(agent.tapped_candidate(cands, {"x": 230 / W, "y": 225 / H}, W, H)["id"], 0)
         self.assertIsNone(agent.tapped_candidate(cands, {"x": 0.9, "y": 0.9}, W, H))
 
@@ -58,20 +59,20 @@ class AgentTest(unittest.TestCase):
         model, seen = scripted(
             [{"name": "inspect_candidates", "args": {"ids": [0]}}, {"name": "find_similar", "args": {"id": 0}}],
             [{"name": "look_closer", "args": {"ids": [1, 2]}}],
-            [{"name": "submit_holds", "args": {"ids": [1, 1, 99, "x"], "note": "紫の2つ"}}])
+            [{"name": "submit_holds", "args": {"ids": [1, 1, 99, "x"], "note": "the two purples"}}])
         ids, trace = agent.run_agent(model, wall(), candidates(), 0)
-        self.assertEqual(ids, [0, 1])  # タップした候補はいつも入る。知らない番号・重なりは捨てる
+        self.assertEqual(ids, [0, 1])  # tapped one always in; unknown and duplicate ids dropped
         self.assertEqual([t["tool"] for t in trace if t["tool"] != "(model)"],
                          ["inspect_candidates", "find_similar", "look_closer", "submit_holds"])
         self.assertTrue(all("ms" in t for t in trace))
-        first = seen[0][1]["content"]  # 写真と、番号つきの候補の絵の2枚
+        first = seen[0][1]["content"]  # the photo and the numbered candidates
         self.assertEqual([p["type"] for p in first], ["text", "image_url", "image_url"])
         self.assertIn("candidate 0", first[0]["text"])
         tool_msgs = [m for m in seen[1] if m["role"] == "tool"]
-        self.assertEqual([m["tool_call_id"] for m in tool_msgs], ["c1_0", "c1_1"])  # 道具の結果は、呼んだ番号に返す
+        self.assertEqual([m["tool_call_id"] for m in tool_msgs], ["c1_0", "c1_1"])  # results go to their calls
         self.assertIn('"purple"', tool_msgs[0]["content"])
-        self.assertIn('"id": 1', tool_msgs[1]["content"])  # 似た色の候補に、もう1つの紫
-        self.assertEqual(seen[2][-1]["role"], "user")  # 拡大した絵は、道具の結果のあとに絵として渡す
+        self.assertIn('"id": 1', tool_msgs[1]["content"])  # the other purple is similar
+        self.assertEqual(seen[2][-1]["role"], "user")  # zoomed crops follow the tool results as an image
         self.assertEqual(seen[2][-1]["content"][1]["type"], "image_url")
 
     def test_turn_limit_and_call_limit(self):
@@ -80,9 +81,9 @@ class AgentTest(unittest.TestCase):
         ids, trace = agent.run_agent(model, wall(), candidates(), 0, turns=3)
         self.assertIsNone(ids)
         self.assertEqual(len(seen), 3)
-        self.assertEqual(trace[-1]["tool"], "(上限で終了)")
-        self.assertIn("at most", seen[1][-1]["content"])  # 1回に使える道具の数を超えた分は断る
-        self.assertIn("submit_holds now", seen[2][-1]["content"])  # 最後の前に、答えるよう伝える
+        self.assertEqual(trace[-1]["tool"], "(turn limit)")
+        self.assertIn("at most", seen[1][-1]["content"])  # calls over the per-turn limit are refused
+        self.assertIn("submit_holds now", seen[2][-1]["content"])  # asked to answer before the last turn
 
     def test_unknown_tool_and_no_answer(self):
         model, _ = scripted([{"name": "rm_rf", "args": {}}], [])
@@ -91,13 +92,12 @@ class AgentTest(unittest.TestCase):
         self.assertIn("unknown tool", trace[1]["result"])
 
     def test_prepare_adds_the_tapped_hold_when_sam_missed_it(self):
-        img = wall()
-        jpeg = jpeg_of(img)
-        tap = {"x": 0.52, "y": 0.355}  # 青のホールド(言葉の頼みでは見つからなかったことにする)
+        jpeg = jpeg_of(wall())
+        tap = {"x": 0.52, "y": 0.355}  # the blue hold, missed by the concept prompt
         post, seen = fake_api({"climbing hold": "<0f>" + record(0, HOLDS[0][0]) + "," + record(1, HOLDS[1][0]),
                                sam.point_prompt(tap["x"], tap["y"], W, H): "<0f>" + record(1, HOLDS[2][0])})
         _, cands, tap_id = agent.prepare(sam.Sam(post), jpeg, tap)
-        self.assertEqual(len(seen), 3)  # 言葉2つと、点1つ
+        self.assertEqual(len(seen), 3)  # two concepts and one point
         self.assertEqual(tap_id, 2)
         self.assertEqual(agent.color_name(cands[2]["hsv"]), "blue")
 
@@ -114,6 +114,26 @@ class AgentTest(unittest.TestCase):
         self.assertIs(sent[0]["store"], False)
         self.assertEqual({t["function"]["name"] for t in sent[0]["tools"]},
                          {"inspect_candidates", "find_similar", "look_closer", "submit_holds"})
+
+    def test_falls_back_when_muse_spark_or_sam_fails(self):
+        jpeg = jpeg_of(wall())
+        tap = {"x": 230 / W, "y": 225 / H}
+        post, _ = fake_api({"climbing hold": "<0f>" + ",".join(record(i, box) for i, (box, _) in enumerate(HOLDS))})
+
+        def broken(body):
+            raise RuntimeError("503")
+
+        traces = []
+        with mock.patch.object(sam, "http_post", lambda env: post), \
+                mock.patch.object(agent, "http_chat", lambda env: broken):
+            holds = agent.meta_hold_finder({}, on_trace=traces.append)(jpeg, tap)
+        self.assertEqual(len(holds), 2)  # Muse Spark failed: SAM candidates filtered by color
+        self.assertEqual(traces[0][-1]["tool"], "(fallback: sam_color)")
+        with mock.patch.object(sam, "http_post", lambda env: broken), \
+                mock.patch.object(agent, "http_chat", lambda env: broken):
+            holds = agent.meta_hold_finder({}, on_trace=traces.append)(jpeg, tap)
+        self.assertEqual(len(holds), 2)  # SAM failed too: color only finds the two purples
+        self.assertEqual(traces[1][-1]["tool"], "(fallback: color)")
 
     def test_off_without_key(self):
         self.assertIsNone(agent.meta_hold_finder({}))
