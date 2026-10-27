@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The topo agent (topo_agent/agent.py), with a fake SAM and a fake Muse Spark (no network)."""
 import io
+import os
 import unittest
 from unittest import mock
 
@@ -107,6 +108,42 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(trace[-1]["tool"], "(turn limit)")
         self.assertIn("at most", seen[1][-1]["content"])  # calls over the per-turn limit are refused
         self.assertIn("submit_holds now", seen[2][-1]["content"])  # asked to answer before the last turn
+
+    def test_default_turns_capped_at_four(self):
+        model, seen = scripted([{"name": "inspect_candidates", "args": {"ids": [0]}}])
+        ids, trace = agent.run_agent(model, wall(), candidates(), 0)  # default turns
+        self.assertIsNone(ids)
+        self.assertEqual(agent.MAX_TURNS, 4)
+        self.assertEqual(len(seen), 4)  # never more than four model calls
+        self.assertEqual(trace[-1]["tool"], "(turn limit)")
+
+    def test_look_closer_capped_per_run(self):
+        model, seen = scripted([{"name": "look_closer", "args": {"ids": [1]}}])  # every turn
+        ids, trace = agent.run_agent(model, wall(), candidates(), 0, turns=4)
+        self.assertIsNone(ids)
+        looks = [t for t in trace if t["tool"] == "look_closer"]
+        self.assertEqual(len(looks), 4)
+        self.assertNotIn("at most", looks[0]["result"])
+        self.assertNotIn("at most", looks[1]["result"])
+        self.assertIn("at most 2 look_closer", looks[2]["result"])  # further calls are refused
+        self.assertIn("at most 2 look_closer", looks[3]["result"])
+        img_msgs = [m for m in seen[3] if m["role"] == "user" and isinstance(m.get("content"), list)]
+        self.assertEqual(len(img_msgs), 3)  # the first message plus two sheets of crops
+
+    def test_image_diet_env(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(agent.image_side(), agent.AI_SIDE)
+            self.assertEqual(agent.jpeg_quality(), 85)
+        with mock.patch.dict(os.environ, {"META_AGENT_IMAGE_SIDE": "640", "META_AGENT_JPEG_QUALITY": "55"}):
+            self.assertEqual(agent.image_side(), 640)
+            self.assertEqual(agent.jpeg_quality(), 55)
+            self.assertLessEqual(max(agent.annotate(wall(), candidates(), 0).size), 640)
+        with mock.patch.dict(os.environ, {"META_AGENT_IMAGE_SIDE": "huge", "META_AGENT_JPEG_QUALITY": "9999"}):
+            self.assertEqual(agent.image_side(), agent.AI_SIDE)  # invalid → default
+            self.assertEqual(agent.jpeg_quality(), 95)  # out of range → clamped
+        full = agent._jpeg(wall())
+        with mock.patch.dict(os.environ, {"META_AGENT_JPEG_QUALITY": "40"}):
+            self.assertLess(len(agent._jpeg(wall())), len(full))
 
     def test_unknown_tool_and_no_answer(self):
         model, seen = scripted([{"name": "rm_rf", "args": {}}], [])

@@ -17,6 +17,7 @@ Tools (deterministic computations on the photo and candidates; the agent cannot 
 
 Guardrails:
 - At most MAX_TURNS model turns and MAX_CALLS tool calls per turn. Beyond that, stop with what is known
+- look_closer at most MAX_LOOKS times per run (each call appends an image, which slows the later turns)
 - At most MAX_HOLDS holds in the answer. Unknown ids are dropped. The tapped candidate is always included
 - Instructions written inside the photo are ignored (stated first in the system prompt)
 - Only the photo and candidates are sent: no names, no logs. Nothing is kept (store: false at Meta too)
@@ -29,6 +30,7 @@ import io
 import json
 import logging
 import math
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -40,8 +42,9 @@ from topo_agent.baseline.shape import _covers, _hsv, _hue_gap, _inside, _mean, c
 log = logging.getLogger(__name__)
 
 MODEL = "muse-spark-1.3"
-MAX_TURNS = 6  # model turns
+MAX_TURNS = 4  # model turns (each turn costs several seconds, so answer early)
 MAX_CALLS = 8  # tool calls per turn
+MAX_LOOKS = 2  # look_closer calls per run (each one appends an image to every later turn)
 MAX_HOLDS = 60
 AI_SIDE = 1280  # long side of the photo shown to the agent (pixels)
 COLOR_SIDE = 640  # long side used to measure candidate colors
@@ -105,6 +108,24 @@ TOOLS = [
 
 COLOR_NAMES = [(0.0, "red"), (0.05, "orange"), (0.12, "yellow"), (0.2, "yellow-green"), (0.33, "green"), (0.47, "cyan"),
                (0.58, "blue"), (0.7, "purple"), (0.83, "pink"), (0.93, "red")]
+
+
+def _env_int(name, default, lo, hi):
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return min(hi, max(lo, value))
+
+
+def image_side():
+    """Long side of the photo shown to the agent (META_AGENT_IMAGE_SIDE overrides AI_SIDE)."""
+    return _env_int("META_AGENT_IMAGE_SIDE", AI_SIDE, 320, 2048)
+
+
+def jpeg_quality():
+    """JPEG quality of images sent to the agent (META_AGENT_JPEG_QUALITY overrides 85)."""
+    return _env_int("META_AGENT_JPEG_QUALITY", 85, 40, 95)
 
 
 def color_name(c):
@@ -207,7 +228,7 @@ def _font(size):
 def annotate(img, cands, tap_id):
     """Picture of candidate outlines and ids (so the agent can talk in ids). The tapped one is drawn thicker."""
     out = img.convert("RGB").copy()
-    out.thumbnail((AI_SIDE, AI_SIDE))
+    out.thumbnail((image_side(), image_side()))
     W, H = out.size
     d = ImageDraw.Draw(out)
     font = _font(max(14, W // 70))
@@ -225,9 +246,9 @@ def annotate(img, cands, tap_id):
     return out
 
 
-def _jpeg(img, quality=85):
+def _jpeg(img, quality=None):
     buf = io.BytesIO()
-    img.save(buf, "JPEG", quality=quality)
+    img.save(buf, "JPEG", quality=jpeg_quality() if quality is None else quality)
     return buf.getvalue()
 
 
@@ -325,7 +346,7 @@ def run_agent(model_call, img, cands, tap_id, turns=MAX_TURNS, clock=time.monoto
     tools = Tools(img, cands, tap_id)
     tap = tools.by_id[tap_id]
     small = img.convert("RGB").copy()
-    small.thumbnail((AI_SIDE, AI_SIDE))
+    small.thumbnail((image_side(), image_side()))
     ask = (f"Find every hold of the same problem as the tapped hold. SAM found {len(cands)} candidates "
            f"(ids 0-{max(tools.by_id)}). The user tapped candidate {tap_id} (marked {tap_id}* in the second image, "
            f"at x={round(tap['x'] * 1000)}, y={round(tap['y'] * 1000)} on a 0-1000 scale).\n\n"
@@ -334,7 +355,7 @@ def run_agent(model_call, img, cands, tap_id, turns=MAX_TURNS, clock=time.monoto
     messages = [{"role": "system", "content": SYSTEM},
                 {"role": "user", "content": [{"type": "text", "text": ask}, _image_part(_jpeg(small)),
                                              _image_part(_jpeg(annotate(img, cands, tap_id))), _image_part(close_up)]}]
-    trace, checked, nudged = [], False, False
+    trace, checked, nudged, looks = [], False, False, 0
     for turn in range(turns):
         started = clock()
         reply = model_call(messages)
@@ -368,9 +389,14 @@ def run_agent(model_call, img, cands, tap_id, turns=MAX_TURNS, clock=time.monoto
             elif name == "find_similar":
                 result = tools.find_similar(args.get("id"))
             elif name == "look_closer":
-                jpeg, result = tools.look_closer(args.get("ids"))
-                if jpeg:
-                    images.append(jpeg)
+                if looks >= MAX_LOOKS:
+                    result = {"error": f"at most {MAX_LOOKS} look_closer calls per run; "
+                                       "decide from the photo, the table and the crops you have"}
+                else:
+                    looks += 1
+                    jpeg, result = tools.look_closer(args.get("ids"))
+                    if jpeg:
+                        images.append(jpeg)
             else:
                 result = {"error": f"unknown tool {name}"}
             if turn == turns - 2:

@@ -49,7 +49,8 @@ flowchart LR
 
 ### Guardrails
 
-- At most 6 model turns and 8 tool calls per turn; at most 60 holds in an answer. Unknown ids are dropped,
+- At most 4 model turns and 8 tool calls per turn; look_closer at most twice per run (each call appends
+  an image, which slows the later turns). At most 60 holds in an answer. Unknown ids are dropped,
   and the tapped hold is always included.
 - An answer with fewer than 3 holds is sent back once for a second look; a text-only reply is reminded once to use
   `submit_holds`.
