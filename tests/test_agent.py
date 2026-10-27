@@ -57,18 +57,22 @@ class AgentTest(unittest.TestCase):
 
     def test_linked_and_table(self):
         cands = candidates()
-        far = dict(cands[1], id=3, x=0.95, y=0.95)  # same purple, but across the wall (more than LINK away)
-        cands.append(far)
-        self.assertEqual(agent.linked_ids(cands, 0, W, H), {0, 1})  # the far purple is not chained to the tap
+        purple = cands[1]
+        cands += [dict(purple, id=3, x=0.5, y=0.6),  # a third purple, chained through id 1
+                  dict(purple, id=4, x=0.98, y=0.98)]  # same purple across the wall (more than LINK away)
+        self.assertEqual(agent.linked_ids(cands, 0, W, H), {0, 1, 3})  # the far purple is not chained to the tap
+        # the tapped hold far from the rest of its problem: a too short chain jumps to the nearest same color
+        lonely = [cands[0], dict(purple, id=1, x=0.9, y=0.9), dict(purple, id=2, x=0.95, y=0.8)]
+        self.assertEqual(agent.linked_ids(lonely, 0, W, H), {0, 1, 2})
         tools = agent.Tools(wall(), cands, 0)
         rows = tools.table().splitlines()
-        self.assertEqual(rows[0], "id | color | color_distance | x | y | size | linked")
+        self.assertEqual(rows[0], "id | color | color_distance | x | y | size | linked | gap")
         self.assertTrue(rows[1].startswith("0* | purple | 0.0 |"))  # the tapped one first, marked with *
-        self.assertTrue(rows[1].endswith("| yes"))
-        self.assertTrue(next(r for r in rows if r.startswith("3 |")).endswith("| no"))
+        self.assertTrue(rows[1].endswith("| yes | 0"))
+        self.assertRegex(next(r for r in rows if r.startswith("4 |")), r"\| no \| [3-9]\d\d$")  # far: gap > 300
         similar = {s["id"]: s for s in tools.find_similar(0)["similar"]}
         self.assertTrue(similar[1]["linked_to_tapped"])
-        self.assertFalse(similar[3]["linked_to_tapped"])
+        self.assertFalse(similar[4]["linked_to_tapped"])
 
     def test_agent_uses_tools_then_submits(self):
         model, seen = scripted(
@@ -77,8 +81,11 @@ class AgentTest(unittest.TestCase):
             [{"name": "submit_holds", "args": {"ids": [1, 1, 99, "x"], "note": "the two purples"}}])
         ids, trace = agent.run_agent(model, wall(), candidates(), 0)
         self.assertEqual(ids, [0, 1])  # tapped one always in; unknown and duplicate ids dropped
+        # two holds is too few for a problem: asked once to look again, the same answer is then accepted
         self.assertEqual([t["tool"] for t in trace if t["tool"] != "(model)"],
-                         ["inspect_candidates", "find_similar", "look_closer", "submit_holds"])
+                         ["inspect_candidates", "find_similar", "look_closer", "submit_holds", "submit_holds",
+                          "submit_holds"])
+        self.assertIn("Only 2 hold(s)", seen[3][-1]["content"])
         self.assertTrue(all("ms" in t for t in trace))
         first = seen[0][1]["content"]  # the photo, the numbered candidates and a close-up of the tapped hold
         self.assertEqual([p["type"] for p in first], ["text", "image_url", "image_url", "image_url"])
@@ -102,10 +109,17 @@ class AgentTest(unittest.TestCase):
         self.assertIn("submit_holds now", seen[2][-1]["content"])  # asked to answer before the last turn
 
     def test_unknown_tool_and_no_answer(self):
-        model, _ = scripted([{"name": "rm_rf", "args": {}}], [])
+        model, seen = scripted([{"name": "rm_rf", "args": {}}], [])
         ids, trace = agent.run_agent(model, wall(), candidates(), 0)
         self.assertIsNone(ids)
         self.assertIn("unknown tool", trace[1]["result"])
+        self.assertEqual(len(seen), 3)  # a text-only reply gets one reminder, then the run ends
+        self.assertIn("submit_holds", seen[2][-1]["content"])
+
+    def test_text_only_reply_is_reminded_once(self):
+        model, _ = scripted([], [{"name": "submit_holds", "args": {"ids": [1, 2]}}])
+        ids, _ = agent.run_agent(model, wall(), candidates(), 0)
+        self.assertEqual(ids, [0, 1, 2])
 
     def test_prepare_adds_the_tapped_hold_when_sam_missed_it(self):
         jpeg = jpeg_of(wall())

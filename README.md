@@ -36,8 +36,9 @@ flowchart LR
 1. **SAM 3.1** (Meta Model API, Responses) segments every hold with the concept prompts `climbing hold` and
    `climbing volume`, plus a point prompt at the tapped spot, all in parallel. Masks are decoded with Meta's
    `meta-sam-parser` and turned into outlines. ([`topo_agent/sam.py`](topo_agent/sam.py))
-2. The agent gets the photo and a second image with every candidate outlined and numbered, so it can talk in ids
-   instead of guessing coordinates.
+2. The agent gets the photo, a second image with every candidate outlined and numbered (so it can talk in ids instead
+   of guessing coordinates), a close-up of the tapped hold (to spot tape), and a table of the candidates closest in color
+   with `linked` (chained to the tapped hold by same-color holds, each gap under 30% of the photo) and `gap`.
 3. **Muse Spark** (`muse-spark-1.3`, Chat Completions with tool calling) picks its own tools:
    - `inspect_candidates(ids)`: color name, hue, saturation, value, size, position, SAM confidence
    - `find_similar(id)`: candidates with a close color, closest first, with distance on the wall
@@ -50,6 +51,8 @@ flowchart LR
 
 - At most 6 model turns and 8 tool calls per turn; at most 60 holds in an answer. Unknown ids are dropped,
   and the tapped hold is always included.
+- An answer with fewer than 3 holds is sent back once for a second look; a text-only reply is reminded once to use
+  `submit_holds`.
 - Text inside the photo that looks like instructions is ignored (stated first in the system prompt).
 - Only the photo and the candidates are sent. No names, no user data. Requests use `store: false`.
 - If Muse Spark fails, the answer falls back to SAM candidates filtered by color (`sam_color`);
@@ -58,22 +61,24 @@ flowchart LR
 
 ## Results so far
 
-Hard sample walls drawn by code ([`topo_agent/baseline/bench.py`](topo_agent/baseline/bench.py)), 9 scenes × seed 11,
-7 marked holds each. One run per method, so treat small differences with care.
+Hard sample walls drawn by code ([`topo_agent/baseline/bench.py`](topo_agent/baseline/bench.py)): 9 scenes × 2 seeds,
+7 marked holds each (126 holds). One run per method.
 
 | Method | Recall | Precision | Seconds / photo |
 |---|---|---|---|
-| `color`: color only (pre-hackathon) | 89% | 97% | 0.9 |
-| `sam_color`: SAM 3.1 + color filter, no agent | 90% | 85% | 2.1 |
-| **`meta`: SAM 3.1 + Muse Spark agent** | **94%** | **100%** | 36 |
+| `color`: color only (pre-hackathon) | 85% | 96% | 0.8 |
+| `sam_color`: SAM 3.1 + color filter, no agent | 90% | 86% | 1.8 |
+| **`meta`: SAM 3.1 + Muse Spark agent** | **99%** | **100%** | **7.6** |
 
-- **Tape problems: recall 14% → 100%.** Hold colors are mixed and only the tape tells the problem apart, so color
-  filters fail while the agent reads the photo.
-- The agent never added a hold from another problem (precision 100%), while `sam_color` picked up the same-color
-  problem on the next wall.
-- Still to improve: speed (36 s per photo), a same-color problem far away (`twins`, where the agent sometimes drops
-  distant holds), and one washed-out hold that SAM missed (`light`).
-- Next: real gym photos (with the photographers' consent) and the pre-hackathon Gemini agent in the same table.
+- **Tape problems: recall 14% → 100%.** Hold colors are mixed and only the tape tells the problem apart. The agent looks
+  at a close-up of the tapped hold first, sees the tape, and stops trusting colors.
+- **Same color on the next wall (`twins`): 57% → 100% recall, without the 58% precision of a plain color filter.**
+  The agent follows the chain of same-color holds from the tapped one and leaves the other group out.
+- The only miss is one washed-out hold that SAM did not segment (`light`).
+- Speed went from 36 s to 7.6 s per photo: the first message already carries a table of candidates (color, position,
+  linked, gap), so clear cases are answered in one turn, and Muse Spark runs with `reasoning_effort: low`.
+- Caveat: these walls were also used while tuning the agent. Real gym photos (with the photographers' consent) and the
+  pre-hackathon Gemini agent are next in the same table.
 
 ## Run it
 
