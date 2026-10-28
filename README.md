@@ -81,9 +81,10 @@ flowchart LR
 
 A faster alternative with no ReAct loop: SAM segments, computer vision classifies each hold's color
 (HSV + CIELAB, mask-boundary pixels excluded) and groups holds by color with spatial neighbors,
-then Muse Spark groups all holds into routes in exactly one model call and answers with JSON only.
-The finder returns the route holding the tapped hold. No retries: invalid JSON falls back to the
-tapped hold's CV color group. ([`topo_agent/pipeline.py`](topo_agent/pipeline.py))
+then Muse Spark finds the tapped hold's route in exactly one model call and answers with JSON only
+(same task, sampling and input evidence as the agent: photo, numbered outlines, tap close-up).
+No retries: invalid JSON falls back to the tapped hold's CV color group.
+([`topo_agent/pipeline.py`](topo_agent/pipeline.py))
 
 ```bash
 python -m topo_agent.eval --bench --methods meta3 --seeds 11
@@ -97,20 +98,20 @@ Hard sample walls drawn by code ([`topo_agent/baseline/bench.py`](topo_agent/bas
 | Method | Recall | Precision | Seconds / photo |
 |---|---|---|---|
 | `color`: color only (pre-hackathon) | 85% | 96% | 0.8 |
-| `sam_color`: SAM 3.1 + color filter, no agent | 90% | 86% | 1.5 |
-| **`meta`: SAM 3.1 + Muse Spark agent** | **99%** | **100%** | **6.5** |
-| `meta3`: three-stage, single pass | 85% | 96% | 12.2 |
+| `sam_color`: SAM 3.1 + color filter, no agent | 90% | 86% | 1.6 |
+| **`meta`: SAM 3.1 + Muse Spark agent** | **99%** | **100%** | **6.8** |
+| `meta3`: three-stage, single pass | 99% | 96% | 5.1 |
 
 - **Tape problems: recall 14% → 100%.** Hold colors are mixed and only the tape tells the problem apart. The agent looks
   at a close-up of the tapped hold first, sees the tape, and stops trusting colors.
 - **Same color on the next wall (`twins`): 57% → 100% recall, without the 58% precision of a plain color filter.**
   The agent follows the chain of same-color holds from the tapped one and leaves the other group out.
 - The only miss is one washed-out hold that SAM did not segment (`light`).
-- Speed went from 36 s to 6.5 s per photo: the first message already carries a table of candidates (color, position,
+- Speed went from 36 s to 6.8 s per photo: the first message already carries a table of candidates (color, position,
   linked, gap), so clear cases are answered in one turn, and Muse Spark runs with `reasoning_effort: low`.
-- `meta3` loses on drawn walls: tape scenes drop to 1/7 hits (one full-wall view cannot resolve tape strips,
-  so Spark groups by color), and whole-wall grouping (~10.3 s) costs more than the agent's one-turn answers.
-  The single pass only wins where the agent needs many turns (real photos, below).
+- `meta3` matches the agent on drawn walls (tape 7/7 both, one pass at ~3.2 s vs one agent turn at ~5 s):
+  asking for the tapped route only, with the tap close-up in the single request, fixed both the tape
+  misses and the whole-wall reasoning cost of the first version.
 - Caveat: these walls were also used while tuning the agent. Real gym photos (with the photographers' consent) and the
   pre-hackathon Gemini agent are next in the same table.
 
@@ -118,14 +119,13 @@ Real gym photos (8 Kaggle route cases, photo + JSON pairs scored like `--bench`,
 
 | Method | Recall | Precision | Seconds / photo | Muse Spark calls |
 |---|---|---|---|---|
-| `meta`: ReAct agent | 49% | 85% | 33.3 | ~4-6 turns |
-| `meta3`: three-stage, single pass | 38% | 62% | 18.4 | 1 |
+| `meta`: ReAct agent | 60% | 85% | 28.6 | ~4-6 turns |
+| `meta3`: three-stage, single pass | 40% | 42% | 11.1 | 1 |
 
-- `meta3` is 45% faster (SAM ~2.8 s, CV colors ~0.4 s, one Spark call ~15.2 s) and never fell back:
-  all 8 replies were valid JSON holding the tapped route. But grouping the whole wall in one pass
-  under-picks shadowed routes (color names fragment: one tap is the only `white` hold on its wall)
-  and over-picks pale walls, with no zoom to double-check. Asking for only the tapped route instead
-  of all routes should cut both the reasoning time and the cautious under-picks.
+- `meta3` is 2.6x faster (SAM ~2.9 s, CV colors ~0.4 s, one Spark call ~7.8 s, zero fallbacks) but
+  weaker on real walls: color names still fragment shadowed routes (recall 40%), and the
+  "when in doubt, include" instruction now over-picks pale walls (0518: 33 found vs 8 truth,
+  precision 42%). The single pass needs tighter inclusion rules for real light.
 
 ## Run it
 
