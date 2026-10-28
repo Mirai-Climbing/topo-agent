@@ -77,6 +77,18 @@ flowchart LR
   if SAM fails too, to the pre-hackathon color-only method.
 - Every step is traced (tool, arguments, result summary, milliseconds), so the app can show how the agent decided.
 
+### Three-stage mode (`meta3`)
+
+A faster alternative with no ReAct loop: SAM segments, computer vision classifies each hold's color
+(HSV + CIELAB, mask-boundary pixels excluded) and groups holds by color with spatial neighbors,
+then Muse Spark groups all holds into routes in exactly one model call and answers with JSON only.
+The finder returns the route holding the tapped hold. No retries: invalid JSON falls back to the
+tapped hold's CV color group. ([`topo_agent/pipeline.py`](topo_agent/pipeline.py))
+
+```bash
+python -m topo_agent.eval --bench --methods meta3 --seeds 11
+```
+
 ## Results so far
 
 Hard sample walls drawn by code ([`topo_agent/baseline/bench.py`](topo_agent/baseline/bench.py)): 9 scenes × 2 seeds,
@@ -97,6 +109,19 @@ Hard sample walls drawn by code ([`topo_agent/baseline/bench.py`](topo_agent/bas
   linked, gap), so clear cases are answered in one turn, and Muse Spark runs with `reasoning_effort: low`.
 - Caveat: these walls were also used while tuning the agent. Real gym photos (with the photographers' consent) and the
   pre-hackathon Gemini agent are next in the same table.
+
+Real gym photos (8 Kaggle route cases, photo + JSON pairs scored like `--bench`, one run per method):
+
+| Method | Recall | Precision | Seconds / photo | Muse Spark calls |
+|---|---|---|---|---|
+| `meta`: ReAct agent | 49% | 85% | 33.3 | ~4-6 turns |
+| `meta3`: three-stage, single pass | 38% | 62% | 18.4 | 1 |
+
+- `meta3` is 45% faster (SAM ~2.8 s, CV colors ~0.4 s, one Spark call ~15.2 s) and never fell back:
+  all 8 replies were valid JSON holding the tapped route. But grouping the whole wall in one pass
+  under-picks shadowed routes (color names fragment: one tap is the only `white` hold on its wall)
+  and over-picks pale walls, with no zoom to double-check. Asking for only the tapped route instead
+  of all routes should cut both the reasoning time and the cautious under-picks.
 
 ## Run it
 
