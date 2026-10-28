@@ -10,6 +10,15 @@ Hard sample walls (--bench, topo_agent/baseline/bench.py) are drawn by code, so 
 
     python -m topo_agent.eval --bench --methods color,gemini,sam_color,meta
 
+Real photos (--photos DIR) are scored from <case>.jpg + <case>.json pairs. The JSON holds the tapped
+hold and the correct holds, all in fractions of the photo size:
+
+    {"tap": {"x": 0.5, "y": 0.5}, "truth": [{"points": [[0.1, 0.1], [0.2, 0.1], ...]}]}
+
+    python -m topo_agent.eval --photos ~/data/realpairs --methods color,sam_color,meta
+
+Only send photos you are allowed to share (your own gym, or a licensed set) to external AI APIs.
+
 - color      color only (pre-hackathon, no AI)
 - gemini     Gemini agent (pre-hackathon)
 - sam_color  SAM 3.1 candidates filtered by color only (no AI judgement)
@@ -20,6 +29,7 @@ Real problems from the app database are scored by mirai-climbing-v2's server/hol
 """
 import argparse
 import io
+import json
 import os
 import random
 import sys
@@ -123,6 +133,51 @@ def by_scene(rows):
     return out
 
 
+def photo_items(directory):
+    """Real-photo eval cases from <case>.jpg + <case>.json pairs (see the module docstring).
+    Stops with an error message on the first bad case: the set is curated, so fail fast."""
+    base = os.path.abspath(directory)
+    if not os.path.isdir(base):
+        sys.exit(f"no such photo directory: {directory}")
+    cases = sorted(f for f in os.listdir(base) if f.endswith(".json"))
+    if not cases:
+        sys.exit(f"no photo cases in {directory} (expected <case>.json next to <case>.jpg)")
+    out = []
+    for case in cases:
+        name = case[:-len(".json")]
+        jpeg = None
+        for ext in (".jpg", ".jpeg", ".png"):
+            photo = os.path.join(base, name + ext)
+            if os.path.isfile(photo):
+                with open(photo, "rb") as f:
+                    jpeg = f.read()
+                break
+        if jpeg is None:
+            sys.exit(f"{case}: no photo (expected {name}.jpg next to it)")
+        with open(os.path.join(base, case), encoding="utf-8") as f:
+            data = json.load(f)
+        tap = data.get("tap") or {}
+        x, y = tap.get("x"), tap.get("y")
+        if (not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (x, y))
+                or not (0 <= x <= 1 and 0 <= y <= 1)):
+            sys.exit(f"{case}: tap x/y must be numbers within 0-1")
+        with Image.open(io.BytesIO(jpeg)) as img:
+            width, height = img.size
+        marks = []
+        for t in data.get("truth") or []:
+            pts = t.get("points") or []
+            if len(pts) < 3:
+                sys.exit(f"{case}: every truth hold needs at least 3 points")
+            xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+            marks.append({"kind": "hold", "use": "any", "x": sum(xs) / len(xs), "y": sum(ys) / len(ys),
+                          "r": max(max(xs) - min(xs), max(ys) - min(ys)) / 2, "points": pts})
+        if not marks:
+            sys.exit(f"{case}: no truth holds")
+        out.append({"id": f"{os.path.basename(base)}-{name}", "jpeg": jpeg, "tap": {"x": x, "y": y},
+                    "marks": {"marks": marks, "photo": {"width": width, "height": height}}})
+    return out
+
+
 def bench(env, names, scenes=None, seeds=(11, 12)):
     from topo_agent.baseline import bench as hold_bench
     methods = finders(env, names)
@@ -143,18 +198,36 @@ def bench(env, names, scenes=None, seeds=(11, 12)):
               f"  mean {s['seconds']}s  errors {s['errors']}")
 
 
+def photos(env, names, directory):
+    methods = finders(env, names)
+    if not methods:
+        sys.exit("no method is available")
+    rows = evaluate(photo_items(directory), methods)
+    for r in rows:
+        print(f"{r['problem']:<28} {r['method']:<9} truth {r['truth']:>3}  found {r['found']:>3}  hits {r['hits']:>3}"
+              f"  {r['seconds']:>5}s  {r['error']}", flush=True)
+    print()
+    for name, s in summary(rows).items():
+        print(f"{'TOTAL':<28} {name:<9} recall {s['recall']:>4.0%}  precision {s['precision']:>4.0%}"
+              f"  mean {s['seconds']}s  errors {s['errors']}")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Score hold finders")
     ap.add_argument("--methods", default="color", help="comma separated: color,gemini,sam_color,meta")
     ap.add_argument("--bench", action="store_true", help="score on the hard sample walls (topo_agent/baseline/bench.py)")
     ap.add_argument("--scenes", default="", help="only these sample wall scenes (comma separated, e.g. light,twins)")
     ap.add_argument("--seeds", default="11,12", help="sample wall seeds (comma separated)")
+    ap.add_argument("--photos", default="", help="score on real photos: DIR with <case>.jpg + <case>.json pairs")
     a = ap.parse_args(argv)
-    if not a.bench:
-        sys.exit("only --bench for now (real problems: mirai-climbing-v2's server/hold_eval.py)")
-    names = [x.strip() for x in a.scenes.split(",") if x.strip()] or None
-    seeds = tuple(int(x) for x in a.seeds.split(",") if x.strip())
-    bench(dict(os.environ), [x.strip() for x in a.methods.split(",") if x.strip()], names, seeds)
+    if a.photos:
+        photos(dict(os.environ), [x.strip() for x in a.methods.split(",") if x.strip()], a.photos)
+    elif a.bench:
+        names = [x.strip() for x in a.scenes.split(",") if x.strip()] or None
+        seeds = tuple(int(x) for x in a.seeds.split(",") if x.strip())
+        bench(dict(os.environ), [x.strip() for x in a.methods.split(",") if x.strip()], names, seeds)
+    else:
+        sys.exit("pass --bench or --photos DIR")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Scoring hold finders (topo_agent/eval.py)."""
+import json
+import os
+import tempfile
 import unittest
+
+from PIL import Image
 
 from topo_agent import eval as hold_eval
 from topo_agent.baseline import bench as hold_bench
+
+
+def photo_pair(d, name="wall", tap=(0.5, 0.5), polys=(((0.1, 0.1), (0.2, 0.1), (0.15, 0.2)),)):
+    img = Image.new("RGB", (200, 100), (10, 20, 30))
+    img.save(os.path.join(d, name + ".jpg"), "JPEG")
+    with open(os.path.join(d, name + ".json"), "w", encoding="utf-8") as f:
+        json.dump({"tap": {"x": tap[0], "y": tap[1]},
+                   "truth": [{"points": [list(p) for p in poly]} for poly in polys]}, f)
 
 
 class EvalTest(unittest.TestCase):
@@ -29,6 +42,38 @@ class EvalTest(unittest.TestCase):
         self.assertGreaterEqual(s["recall"], 0.7)
         self.assertGreaterEqual(s["precision"], 0.9)
         self.assertEqual(set(hold_eval.by_scene(rows)), {"light", "black", "twins", "busy"})
+
+    def test_photo_items_loads_pairs_and_scores(self):
+        with tempfile.TemporaryDirectory() as d:
+            photo_pair(d, polys=(((0.1, 0.1), (0.2, 0.1), (0.15, 0.2)),
+                                        ((0.5, 0.5), (0.6, 0.5), (0.55, 0.6))))
+            items = hold_eval.photo_items(d)
+            self.assertEqual(len(items), 1)
+            it = items[0]
+            self.assertEqual(it["tap"], {"x": 0.5, "y": 0.5})
+            self.assertEqual(it["marks"]["photo"], {"width": 200, "height": 100})
+            self.assertEqual(len(it["marks"]["marks"]), 2)
+            self.assertAlmostEqual(it["marks"]["marks"][0]["x"], 0.15)
+            rows = hold_eval.evaluate(items, {"fake": lambda jpeg, point: [{"x": 0.15, "y": 0.133, "r": 0.01}]})
+            self.assertEqual((rows[0]["hits"], rows[0]["found"], rows[0]["truth"]), (1, 1, 2))
+
+    def test_photo_items_rejects_bad_cases(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(SystemExit):
+                hold_eval.photo_items(d)  # no pairs
+        with tempfile.TemporaryDirectory() as d:
+            photo_pair(d)
+            os.remove(os.path.join(d, "wall.jpg"))
+            with self.assertRaises(SystemExit):
+                hold_eval.photo_items(d)  # json without a photo
+        with tempfile.TemporaryDirectory() as d:
+            photo_pair(d, tap=(9, 0))
+            with self.assertRaises(SystemExit):
+                hold_eval.photo_items(d)  # tap outside 0-1
+        with tempfile.TemporaryDirectory() as d:
+            photo_pair(d, polys=())
+            with self.assertRaises(SystemExit):
+                hold_eval.photo_items(d)  # no truth holds
 
 
 if __name__ == "__main__":
