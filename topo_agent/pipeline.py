@@ -9,8 +9,8 @@ Each photo goes through exactly three stages:
 2. Computer vision classifies each hold's color from the photo: HSV + CIELAB features
    per hold, mask-boundary pixels excluded, highlights and shadows down-weighted.
    Holds are grouped by color similarity and same-group spatial neighbors are listed.
-3. Muse Spark groups holds into routes in exactly one model call (no tools, no loop)
-   and answers with JSON only. The finder returns the route holding the tapped hold.
+3. Muse Spark finds the tapped hold's route in exactly one model call (no tools, no loop)
+   and answers with JSON only.
 
 The trace records the latency of each stage separately (sam, color, spark, post) plus
 the API call counts and token usage when the API reports it. There are no retries:
@@ -33,29 +33,30 @@ log = logging.getLogger(__name__)
 
 SHRINK = 0.85  # outlines are shrunk toward their center for color sampling (excludes mask-boundary pixels)
 MIN_PIXELS = 5  # fewer inside pixels than this: sample the unshrunk outline instead
-TEMPERATURE = 0  # single-pass grouping is deterministic; the photo carries the evidence
+TEMPERATURE = 0.2  # same as the ReAct agent (agent.py); only the reasoning path differs, not the sampling
 
 SYSTEM3 = """You are a climbing route grouping engine, not an exploratory agent.
 
-Task: identify distinct climbing routes from the segmented climbing hold data below.
+Task: find every hold of the same route as the tapped hold (marked * in the table and outlines).
 
 Input: hold ids, positions (x, y, size on a 0-1000 scale), precomputed colors (names, HSV and
 CIELAB features you must trust, not recompute), color similarity groups, same-group spatial
-neighbors, the wall photo, and a second image where every hold is outlined and numbered.
+neighbors, the wall photo, a second image where every hold is outlined and numbered, and a
+close-up of the tapped hold.
 
 Instructions:
-1. Analyze all holds jointly in a single inference pass.
+1. Answer in a single inference pass. Find ONLY the tapped hold's route, not the other routes.
 2. Do not perform color detection or segmentation again.
-3. Group holds into climbing routes based on color consistency, spatial arrangement, and route
-   markers (tape next to holds) when visible in the photos.
-4. Do not assume that all holds of the same color belong to one route.
-5. Distinguish separate routes sharing the same color using spatial relationships and the photos
-   (a same-color group across a gap or on another wall is usually another route).
-6. Never invent hold ids; use only the ids in the table. Never assign a hold without evidence.
-7. Mark ambiguous holds as unassigned rather than guessing.
-8. Return only valid JSON, without explanations or intermediate reasoning:
-{"routes": [{"route_id": 1, "color": "red", "hold_ids": [1, 4, 7], "confidence": 0.95}],
- "unassigned_hold_ids": [9, 12]}"""
+3. First look at the close-up: a strip of tape next to the tapped hold means a tape route
+   (holds of any color with the same tape; precomputed colors do not help). Without tape,
+   the route is the holds of the same color on the same wall.
+4. Do not assume that all holds of the same color belong to one route: a same-color group
+   across a gap or on another wall is usually another route.
+5. Never invent hold ids; use only the ids in the table. Always include the tapped hold.
+6. When in doubt about a same-color hold on the same wall, include it. Exclude holds that
+   are clearly a different color or on a different wall.
+7. Return only valid JSON, without explanations or intermediate reasoning:
+{"hold_ids": [1, 4, 7], "confidence": 0.95}"""
 
 
 def rgb_to_lab(rgb):
@@ -189,7 +190,8 @@ def prompt_table(cands, tap_id):
     names = {c["group"]: c["color_name"] for c in cands}
     detail = "; ".join(f"{g} ({names[g]}): {ids}" for g, ids in sorted(groups.items()))
     return ("\n".join(rows) + f"\nColor groups: {detail}\n"
-            f"The user tapped hold {tap_id} (marked {tap_id}*). Group ALL holds into routes and return JSON only.")
+            f"The user tapped hold {tap_id} (marked {tap_id}*). Return ONLY the holds of the tapped "
+            f"hold's route as JSON.")
 
 
 def single_call(post, model=agent_mod.MODEL, effort=agent_mod.EFFORT):
@@ -204,8 +206,8 @@ def single_call(post, model=agent_mod.MODEL, effort=agent_mod.EFFORT):
     return call
 
 
-def parse_routes(text, known):
-    """Route JSON → {"routes", "unassigned", "error"}. Rejects unknown/duplicate ids and bad shapes."""
+def parse_answer(text, known):
+    """Route JSON → {"ids", "confidence", "error"}. Rejects unknown/duplicate ids and bad shapes."""
     body = text.strip()
     if body.startswith("```"):  # ```json ... ``` fences are unwrapped, not rejected
         body = body.split("\n", 1)[1] if "\n" in body else ""
@@ -213,67 +215,46 @@ def parse_routes(text, known):
     try:
         data = json.loads(body)
     except json.JSONDecodeError:
-        return {"routes": [], "unassigned": [], "error": "not valid JSON"}
-    if not isinstance(data, dict) or not isinstance(data.get("routes"), list):
-        return {"routes": [], "unassigned": [], "error": "missing routes list"}
-    routes, seen = [], set()
-    for n, r in enumerate(data["routes"]):
-        if not isinstance(r, dict):
-            return {"routes": [], "unassigned": [], "error": f"route {n} is not an object"}
-        ids, conf = r.get("hold_ids"), r.get("confidence")
-        if (not isinstance(r.get("route_id"), int) or isinstance(r.get("route_id"), bool)
-                or not isinstance(r.get("color"), str) or not isinstance(ids, list)
-                or not isinstance(conf, (int, float)) or isinstance(conf, bool) or not 0 <= conf <= 1):
-            return {"routes": [], "unassigned": [], "error": f"route {n} has a bad shape"}
-        clean = []
-        for i in ids:
-            if not isinstance(i, int) or isinstance(i, bool) or i not in known:
-                return {"routes": [], "unassigned": [], "error": f"route {n} has unknown id {i!r}"}
-            if i in seen or i in clean:
-                return {"routes": [], "unassigned": [], "error": f"hold {i} is assigned twice"}
-            clean.append(i)
-        seen.update(clean)
-        routes.append({"route_id": r["route_id"], "color": r["color"], "hold_ids": clean, "confidence": conf})
-    unassigned = data.get("unassigned_hold_ids", [])
-    if not isinstance(unassigned, list):
-        return {"routes": [], "unassigned": [], "error": "unassigned_hold_ids is not a list"}
-    for i in unassigned:
+        return {"ids": [], "confidence": 0, "error": "not valid JSON"}
+    ids, conf = (data.get("hold_ids"), data.get("confidence")) if isinstance(data, dict) else (None, None)
+    if (not isinstance(ids, list) or not ids
+            or not isinstance(conf, (int, float)) or isinstance(conf, bool) or not 0 <= conf <= 1):
+        return {"ids": [], "confidence": 0, "error": "missing hold_ids or confidence"}
+    clean = []
+    for i in ids:
         if not isinstance(i, int) or isinstance(i, bool) or i not in known:
-            return {"routes": [], "unassigned": [], "error": f"unassigned has unknown id {i!r}"}
-        if i in seen:
-            return {"routes": [], "unassigned": [], "error": f"hold {i} is assigned twice"}
-        seen.add(i)
-    return {"routes": routes, "unassigned": list(unassigned), "error": ""}
+            return {"ids": [], "confidence": 0, "error": f"unknown id {i!r}"}
+        if i in clean:
+            return {"ids": [], "confidence": 0, "error": f"hold {i} is assigned twice"}
+        clean.append(i)
+    return {"ids": clean, "confidence": conf, "error": ""}
 
 
 def run_once(spark, img, cands, tap_id):
-    """One Spark call over all holds. Returns (ids of the tapped route, info).
+    """One Spark call for the tapped route. Returns (hold ids, info).
 
-    info holds the raw reply, token usage and the fallback reason ("" when Spark answered
-    with the tapped route). Never retries: on failure or invalid JSON the answer is the
-    CV color group of the tap."""
+    info holds the raw reply, token usage and the fallback reason ("" when Spark answered).
+    Never retries: on failure or invalid JSON the answer is the CV color group of the tap."""
     small = img.convert("RGB").copy()
     small.thumbnail((agent_mod.AI_SIDE, agent_mod.AI_SIDE))
-    messages = [{"role": "system", "content": SYSTEM3},
-                {"role": "user", "content": [{"type": "text", "text": prompt_table(cands, tap_id)},
-                                             agent_mod._image_part(agent_mod._jpeg(small)),
-                                             agent_mod._image_part(agent_mod._jpeg(agent_mod.annotate(img, cands, tap_id)))]}]
+    close_up, _ = agent_mod.Tools(img, cands, tap_id).look_closer([tap_id])
+    content = [{"type": "text", "text": prompt_table(cands, tap_id)},
+               agent_mod._image_part(agent_mod._jpeg(small)),
+               agent_mod._image_part(agent_mod._jpeg(agent_mod.annotate(img, cands, tap_id)))]
+    if close_up:
+        content.append(agent_mod._image_part(close_up))
+    messages = [{"role": "system", "content": SYSTEM3}, {"role": "user", "content": content}]
     try:
         reply = spark(messages)
     except Exception as err:
         return fallback_ids(cands, tap_id), {"text": "", "usage": {},
                                              "fallback": f"{type(err).__name__}: {str(err)[:200]}"}
     text, usage = reply.get("text") or "", reply.get("usage") or {}
-    parsed = parse_routes(text, {c["id"] for c in cands})
+    parsed = parse_answer(text, {c["id"] for c in cands})
     if parsed["error"]:
         return fallback_ids(cands, tap_id), {"text": text, "usage": usage, "fallback": parsed["error"]}
-    for r in parsed["routes"]:
-        if tap_id in r["hold_ids"]:
-            ids = agent_mod.clean_ids(r["hold_ids"], {c["id"] for c in cands}, tap_id)
-            return ids, {"text": text, "usage": usage, "fallback": "",
-                         "route": r["route_id"], "routes": len(parsed["routes"])}
-    return fallback_ids(cands, tap_id), {"text": text, "usage": usage,
-                                         "fallback": "tapped hold not in any route"}
+    ids = agent_mod.clean_ids(parsed["ids"], {c["id"] for c in cands}, tap_id)
+    return ids, {"text": text, "usage": usage, "fallback": "", "confidence": parsed["confidence"]}
 
 
 def find_with(sam, spark, jpeg, point, on_trace=None, clock=time.monotonic):
@@ -309,8 +290,8 @@ def find_with(sam, spark, jpeg, point, on_trace=None, clock=time.monotonic):
             "ms": round((clock() - started) * 1000)}
     if info.get("fallback"):
         step["args"]["fallback"] = info["fallback"]
-    if info.get("route") is not None:
-        step["args"]["route"] = info["route"]
+    if info.get("confidence") is not None:
+        step["args"]["confidence"] = info["confidence"]
     if info.get("usage"):
         step["args"]["tokens"] = {k: v for k, v in info["usage"].items() if "token" in k}
     trace.append(step)

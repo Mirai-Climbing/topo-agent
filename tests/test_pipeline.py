@@ -78,44 +78,34 @@ class ColorTest(unittest.TestCase):
 
 class ParseTest(unittest.TestCase):
     def test_valid(self):
-        out = pipeline.parse_routes(json.dumps({"routes": [{"route_id": 1, "color": "red", "hold_ids": [1, 4],
-                                                                       "confidence": 0.9}],
-                                                           "unassigned_hold_ids": [9]}), {1, 4, 9})
+        out = pipeline.parse_answer(json.dumps({"hold_ids": [1, 4], "confidence": 0.9}), {1, 4, 9})
         self.assertEqual(out["error"], "")
-        self.assertEqual(out["routes"][0]["hold_ids"], [1, 4])
-        self.assertEqual(out["unassigned"], [9])
+        self.assertEqual(out["ids"], [1, 4])
+        self.assertEqual(out["confidence"], 0.9)
 
     def test_fences_are_unwrapped(self):
-        out = pipeline.parse_routes('```json\n{"routes": [], "unassigned_hold_ids": []}\n```', set())
+        out = pipeline.parse_answer('```json\n{"hold_ids": [1], "confidence": 0.5}\n```', {1})
         self.assertEqual(out["error"], "")
 
     def test_rejects(self):
-        good = {"routes": [{"route_id": 1, "color": "red", "hold_ids": [1], "confidence": 0.9}],
-                "unassigned_hold_ids": []}
         bad = [("not json", "not valid JSON"),
-               (json.dumps({**good, "routes": [{"route_id": 1, "color": "red", "hold_ids": [2], "confidence": 0.9}]}),
-                "unknown id"),
-               (json.dumps({**good, "routes": [{"route_id": 1, "color": "red", "hold_ids": [1, 1], "confidence": 0.9}]}),
-                "twice"),
-               (json.dumps({"routes": [{"route_id": 1, "color": "red", "hold_ids": [1], "confidence": 0.9},
-                                        {"route_id": 2, "color": "blue", "hold_ids": [1], "confidence": 0.5}]}),
-                "twice"),
-               (json.dumps({**good, "unassigned_hold_ids": [1]}), "twice"),
-               (json.dumps({**good, "routes": [{"route_id": 1, "color": "red", "hold_ids": [1], "confidence": 2}]}),
-                "bad shape"),
-               (json.dumps({"unassigned_hold_ids": []}), "missing routes")]
+               (json.dumps({"hold_ids": [], "confidence": 0.9}), "missing hold_ids"),
+               (json.dumps({"hold_ids": [1]}), "missing hold_ids"),
+               (json.dumps({"hold_ids": [2], "confidence": 0.9}), "unknown id"),
+               (json.dumps({"hold_ids": [1, 1], "confidence": 0.9}), "twice"),
+               (json.dumps({"hold_ids": [1], "confidence": 2}), "missing hold_ids"),
+               (json.dumps({"routes": []}), "missing hold_ids")]
         for text, hint in bad:
             with self.subTest(text=text[:40]):
-                self.assertIn(hint, pipeline.parse_routes(text, {1})["error"])
+                self.assertIn(hint, pipeline.parse_answer(text, {1})["error"])
 
 
 class RunOnceTest(unittest.TestCase):
-    def route_reply(self, ids=(0, 1), tap=0):
+    def route_reply(self, ids=(0, 1)):
         def spark(messages):
             spark.seen.append(messages)
-            return {"text": json.dumps({"routes": [{"route_id": 1, "color": "red", "hold_ids": list(ids),
-                                                              "confidence": 0.9}],
-                                                  "unassigned_hold_ids": [2]}), "usage": {"prompt_tokens": 10}}
+            return {"text": json.dumps({"hold_ids": list(ids), "confidence": 0.9}),
+                    "usage": {"prompt_tokens": 10}}
         spark.seen = []
         return spark
 
@@ -125,10 +115,10 @@ class RunOnceTest(unittest.TestCase):
         ids, info = pipeline.run_once(spark, wall(), cands, 0)
         self.assertEqual(ids, [0, 1])
         self.assertEqual(info["fallback"], "")
-        self.assertEqual(info["route"], 1)
+        self.assertEqual(info["confidence"], 0.9)
         self.assertEqual(len(spark.seen), 1)  # exactly one model call
         user = spark.seen[0][1]["content"]
-        self.assertEqual(len(user), 3)  # table text + photo + numbered candidates
+        self.assertEqual(len(user), 4)  # table text + photo + numbered candidates + tap close-up
         self.assertIn("0*", user[0]["text"])  # the tap is marked in the table
 
     def test_invalid_json_falls_back_without_retry(self):
@@ -154,11 +144,11 @@ class RunOnceTest(unittest.TestCase):
         self.assertEqual(ids, [0, 1])
         self.assertIn("503", info["fallback"])
 
-    def test_tap_outside_any_route_falls_back(self):
+    def test_tap_is_included_even_when_model_omits_it(self):
         cands = pipeline.add_neighbors(pipeline.group_by_color(candidates()), W, H)
-        ids, info = pipeline.run_once(self.route_reply(ids=(1,), tap=0), wall(), cands, 0)
-        self.assertEqual(ids, [0, 1])
-        self.assertEqual(info["fallback"], "tapped hold not in any route")
+        ids, info = pipeline.run_once(self.route_reply(ids=(1,)), wall(), cands, 0)
+        self.assertEqual(ids, [0, 1])  # clean_ids puts the tapped hold first
+        self.assertEqual(info["fallback"], "")
 
 
 class FinderTest(unittest.TestCase):
@@ -202,7 +192,7 @@ class FinderTest(unittest.TestCase):
 
         out = pipeline.single_call(post, effort="")([])  # empty effort: the API default
         self.assertEqual(out, {"text": "{}", "usage": {"total_tokens": 5}})
-        self.assertEqual(sent[0]["temperature"], 0)
+        self.assertEqual(sent[0]["temperature"], 0.2)  # same sampling as the ReAct agent
         self.assertIs(sent[0]["store"], False)
         self.assertNotIn("tools", sent[0])
         self.assertNotIn("reasoning_effort", sent[0])
