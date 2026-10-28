@@ -97,16 +97,20 @@ Hard sample walls drawn by code ([`topo_agent/baseline/bench.py`](topo_agent/bas
 | Method | Recall | Precision | Seconds / photo |
 |---|---|---|---|
 | `color`: color only (pre-hackathon) | 85% | 96% | 0.8 |
-| `sam_color`: SAM 3.1 + color filter, no agent | 90% | 86% | 1.8 |
-| **`meta`: SAM 3.1 + Muse Spark agent** | **99%** | **100%** | **7.6** |
+| `sam_color`: SAM 3.1 + color filter, no agent | 90% | 86% | 1.5 |
+| **`meta`: SAM 3.1 + Muse Spark agent** | **99%** | **100%** | **6.5** |
+| `meta3`: three-stage, single pass | 85% | 96% | 12.2 |
 
 - **Tape problems: recall 14% → 100%.** Hold colors are mixed and only the tape tells the problem apart. The agent looks
   at a close-up of the tapped hold first, sees the tape, and stops trusting colors.
 - **Same color on the next wall (`twins`): 57% → 100% recall, without the 58% precision of a plain color filter.**
   The agent follows the chain of same-color holds from the tapped one and leaves the other group out.
 - The only miss is one washed-out hold that SAM did not segment (`light`).
-- Speed went from 36 s to 7.6 s per photo: the first message already carries a table of candidates (color, position,
+- Speed went from 36 s to 6.5 s per photo: the first message already carries a table of candidates (color, position,
   linked, gap), so clear cases are answered in one turn, and Muse Spark runs with `reasoning_effort: low`.
+- `meta3` loses on drawn walls: tape scenes drop to 1/7 hits (one full-wall view cannot resolve tape strips,
+  so Spark groups by color), and whole-wall grouping (~10.3 s) costs more than the agent's one-turn answers.
+  The single pass only wins where the agent needs many turns (real photos, below).
 - Caveat: these walls were also used while tuning the agent. Real gym photos (with the photographers' consent) and the
   pre-hackathon Gemini agent are next in the same table.
 
