@@ -16,6 +16,11 @@ The trace records the latency of each stage separately (sam, color, spark, post)
 the API call counts and token usage when the API reports it. There are no retries:
 on a Spark failure or invalid JSON the answer falls back to the tapped hold's CV
 color group, and on a SAM failure to the pre-hackathon color-only method.
+
+The single-pass system prompt has variants for real gym light (META3_PROMPT=v1, v2
+or v3; default v1 keeps the original rules): v2 verifies colors visually and rejects
+wall-colored pale lookalikes, v3 additionally merges split color groups and follows
+hold chains to recover shadowed routes.
 """
 import io
 import json
@@ -57,6 +62,101 @@ Instructions:
    are clearly a different color or on a different wall.
 7. Return only valid JSON, without explanations or intermediate reasoning:
 {"hold_ids": [1, 4, 7], "confidence": 0.95}"""
+
+SYSTEM3_V2 = """You are a climbing route grouping engine, not an exploratory agent.
+
+Task: find every hold of the same route as the tapped hold (marked * in the table and outlines).
+
+Input: hold ids, positions (x, y, size on a 0-1000 scale), precomputed colors (names, HSV and
+CIELAB features), color similarity groups, same-group spatial neighbors, the wall photo, a second
+image where every hold is outlined and numbered, and a close-up of the tapped hold.
+
+The table is a cheap color sensor, not the truth: on real photos chalk dust washes colors out and
+shadows darken them, so color names and groups are often wrong. Trust your eyes over the table.
+
+Instructions:
+1. Answer in a single inference pass. Find ONLY the tapped hold's route, not the other routes.
+2. First look at the close-up: a strip of tape next to the tapped hold means a tape route
+   (holds of any color with the same tape; colors and groups do not help). Without tape,
+   the route is the holds that look the same color as the tapped hold IN THE PHOTOS.
+3. Decide the tapped hold's true color from the close-up and the photos, not from its table row.
+   If the table calls it gray, white or black but it looks red, orange, yellow, green, blue or
+   pink, the table is wrong: collect the holds that visually match the tap, whatever group the
+   table puts them in.
+4. Judge matches by hue family in the photos and ignore brightness: a hold in shadow looks darker
+   and a hold under a lamp looks washed out, but the hue stays the same. Shadow or glare alone
+   never excludes a hold.
+5. Pale gray, white and beige holds that look like the bare wall or chalk dust are NOT the route
+   when the tapped hold is a saturated color: exclude them even if the table puts them in the
+   tapped hold's group. Pale holds qualify only when the tapped hold is itself pale, and then only
+   the ones that clearly share its tint on the same wall.
+6. The route runs from the bottom to the top as one continuous line you can follow from the tapped
+   hold. A same-color hold across a gap or on another wall is usually another route: exclude it.
+7. Never invent hold ids; use only the ids in the table. Always include the tapped hold.
+8. When in doubt, compare the hold with the tapped hold in the photos: include it only if the
+   colors clearly match and it sits on the same wall and line. Exclude wall-colored lookalikes
+   and holds that are clearly a different color.
+9. Return only valid JSON, without explanations or intermediate reasoning:
+{"hold_ids": [1, 4, 7], "confidence": 0.95}"""
+
+SYSTEM3_V3 = """You are a climbing route grouping engine, not an exploratory agent.
+
+Task: find every hold of the same route as the tapped hold (marked * in the table and outlines).
+
+Input: hold ids, positions (x, y, size on a 0-1000 scale), precomputed colors (names, HSV and
+CIELAB features), color similarity groups, same-group spatial neighbors, the wall photo, a second
+image where every hold is outlined and numbered, and a close-up of the tapped hold.
+
+The table is a cheap color sensor, not the truth: on real photos chalk dust washes colors out and
+shadows darken them, so color names and groups are often wrong. Trust your eyes over the table.
+
+Instructions:
+1. Answer in a single inference pass. Find ONLY the tapped hold's route, not the other routes.
+2. First look at the close-up: a strip of tape next to the tapped hold means a tape route
+   (holds of any color with the same tape; colors and groups do not help). Without tape,
+   the route is the holds that look the same color as the tapped hold IN THE PHOTOS.
+3. Decide the tapped hold's true color from the close-up and the photos, not from its table row.
+   If the table calls it gray, white or black but it looks red, orange, yellow, green, blue or
+   pink, the table is wrong: collect the holds that visually match the tap, whatever group the
+   table puts them in.
+4. Judge matches by hue family in the photos and ignore brightness: a hold in shadow looks darker
+   and a hold under a lamp looks washed out, but the hue stays the same. Shadow or glare alone
+   never excludes a hold.
+5. Pale gray, white and beige holds that look like the bare wall or chalk dust are NOT the route
+   when the tapped hold is a saturated color: exclude them even if the table puts them in the
+   tapped hold's group. Pale holds qualify only when the tapped hold is itself pale, and then only
+   the ones that clearly share its tint on the same wall.
+6. One route is often split across several table groups (shadow turns green to gray or black,
+   chalk turns red to pink or white). After the visual matches in the tapped hold's group, scan
+   the OTHER groups for holds that look like the tapped hold in the photos on the same wall and
+   line, and include them too.
+7. The near column lists only direct neighbors; the route continues through chains (tap to A to B
+   to C). Include visual matches reachable through a chain of same-looking holds, not just the
+   tapped hold's direct neighbors.
+8. A problem usually has 4 to 15 holds. Fewer than 4 means shadowed or far holds were missed:
+   look again at the other groups and at far holds on the same line before answering.
+9. The route runs from the bottom to the top as one continuous line you can follow from the tapped
+   hold. A same-color hold across a gap or on another wall is usually another route: exclude it.
+10. Never invent hold ids; use only the ids in the table. Always include the tapped hold.
+11. When in doubt, compare the hold with the tapped hold in the photos: include it only if the
+    colors clearly match and it sits on the same wall and line. Exclude wall-colored lookalikes
+    and holds that are clearly a different color.
+12. Return only valid JSON, without explanations or intermediate reasoning:
+{"hold_ids": [1, 4, 7], "confidence": 0.95}"""
+
+PROMPTS = {"v1": SYSTEM3, "v2": SYSTEM3_V2, "v3": SYSTEM3_V3}
+DEFAULT_PROMPT = "v1"
+
+
+def system_prompt(name):
+    """Variant name → (name, system text). Empty or unknown names fall back to v1 (current behavior)."""
+    key = (name or "").strip().lower()
+    if key in ("", DEFAULT_PROMPT, "default"):
+        return DEFAULT_PROMPT, SYSTEM3
+    if key in PROMPTS:
+        return key, PROMPTS[key]
+    log.warning("route pipeline: unknown META3_PROMPT %r, using v1", name)
+    return DEFAULT_PROMPT, SYSTEM3
 
 
 def rgb_to_lab(rgb):
@@ -230,11 +330,14 @@ def parse_answer(text, known):
     return {"ids": clean, "confidence": conf, "error": ""}
 
 
-def run_once(spark, img, cands, tap_id):
+def run_once(spark, img, cands, tap_id, prompt=""):
     """One Spark call for the tapped route. Returns (hold ids, info).
 
-    info holds the raw reply, token usage and the fallback reason ("" when Spark answered).
-    Never retries: on failure or invalid JSON the answer is the CV color group of the tap."""
+    prompt selects the system prompt variant (v1, v2 or v3; default v1 keeps current
+    behavior). info holds the raw reply, token usage, the resolved variant name and the
+    fallback reason ("" when Spark answered). Never retries: on failure or invalid JSON
+    the answer is the CV color group of the tap."""
+    variant, system = system_prompt(prompt)
     small = img.convert("RGB").copy()
     small.thumbnail((agent_mod.AI_SIDE, agent_mod.AI_SIDE))
     close_up, _ = agent_mod.Tools(img, cands, tap_id).look_closer([tap_id])
@@ -243,22 +346,26 @@ def run_once(spark, img, cands, tap_id):
                agent_mod._image_part(agent_mod._jpeg(agent_mod.annotate(img, cands, tap_id)))]
     if close_up:
         content.append(agent_mod._image_part(close_up))
-    messages = [{"role": "system", "content": SYSTEM3}, {"role": "user", "content": content}]
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
     try:
         reply = spark(messages)
     except Exception as err:
-        return fallback_ids(cands, tap_id), {"text": "", "usage": {},
+        return fallback_ids(cands, tap_id), {"text": "", "usage": {}, "prompt": variant,
                                              "fallback": f"{type(err).__name__}: {str(err)[:200]}"}
     text, usage = reply.get("text") or "", reply.get("usage") or {}
     parsed = parse_answer(text, {c["id"] for c in cands})
     if parsed["error"]:
-        return fallback_ids(cands, tap_id), {"text": text, "usage": usage, "fallback": parsed["error"]}
+        return fallback_ids(cands, tap_id), {"text": text, "usage": usage, "prompt": variant,
+                                             "fallback": parsed["error"]}
     ids = agent_mod.clean_ids(parsed["ids"], {c["id"] for c in cands}, tap_id)
-    return ids, {"text": text, "usage": usage, "fallback": "", "confidence": parsed["confidence"]}
+    return ids, {"text": text, "usage": usage, "prompt": variant, "fallback": "",
+                 "confidence": parsed["confidence"]}
 
 
-def find_with(sam, spark, jpeg, point, on_trace=None, clock=time.monotonic):
-    """(JPEG, point → holds) with injected SAM and Spark. Trace steps: (sam), (color), (spark), (post)."""
+def find_with(sam, spark, jpeg, point, on_trace=None, clock=time.monotonic, prompt=""):
+    """(JPEG, point → holds) with injected SAM and Spark. Trace steps: (sam), (color), (spark), (post).
+
+    prompt selects the single-pass system prompt variant (v1, v2 or v3; default v1)."""
     started = clock()
     try:
         img, cands, tap_id = agent_mod.prepare(sam, jpeg, point)
@@ -285,8 +392,8 @@ def find_with(sam, spark, jpeg, point, on_trace=None, clock=time.monotonic):
     trace.append({"tool": "(color)", "args": {"groups": len({c["group"] for c in cands})},
                   "ms": round((clock() - started) * 1000)})
     started = clock()
-    ids, info = run_once(spark, img, cands, tap_id)
-    step = {"tool": "(spark)", "args": {"count": len(ids), "spark_calls": 1},
+    ids, info = run_once(spark, img, cands, tap_id, prompt=prompt)
+    step = {"tool": "(spark)", "args": {"count": len(ids), "spark_calls": 1, "prompt": info["prompt"]},
             "ms": round((clock() - started) * 1000)}
     if info.get("fallback"):
         step["args"]["fallback"] = info["fallback"]
@@ -308,14 +415,16 @@ def route_finder(env, on_trace=None):
     """Find holds with the three-stage pipeline (SAM + CV colors + single-pass Spark).
 
     (JPEG, point → holds), or None without a key. Pass on_trace(trace) here, or to each
-    call as find(jpeg, point, on_trace=...), to receive the per-stage steps."""
+    call as find(jpeg, point, on_trace=...), to receive the per-stage steps.
+    META3_PROMPT in env selects the single-pass system prompt variant (v1, v2 or v3)."""
     post, chat = sam_mod.http_post(env), agent_mod.http_chat(env)
     if not (post and chat):
         return None
     sam = sam_mod.Sam(post)
     spark = single_call(chat, env.get("META_AGENT_MODEL", agent_mod.MODEL),
                         env.get("META_AGENT_EFFORT", agent_mod.EFFORT))
+    prompt = env.get("META3_PROMPT", "")
 
     def find(jpeg, point, on_trace=on_trace):
-        return find_with(sam, spark, jpeg, point, on_trace)
+        return find_with(sam, spark, jpeg, point, on_trace, prompt=prompt)
     return find

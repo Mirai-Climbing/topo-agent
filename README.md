@@ -90,6 +90,11 @@ No retries: invalid JSON falls back to the tapped hold's CV color group.
 python -m topo_agent.eval --bench --methods meta3 --seeds 11
 ```
 
+`META3_PROMPT` selects the single-pass system prompt variant: `v1` (default, the original rules),
+`v2` (trusts the photos over the color table, rejects wall-colored pale lookalikes) or
+`v3` (v2 plus cross-group merging and hold chains for shadowed routes).
+The variant is recorded in the trace (`(spark)` step) and in `run_once` info.
+
 ## Results so far
 
 Hard sample walls drawn by code ([`topo_agent/baseline/bench.py`](topo_agent/baseline/bench.py)): 9 scenes × 2 seeds,

@@ -196,3 +196,110 @@ class FinderTest(unittest.TestCase):
         self.assertIs(sent[0]["store"], False)
         self.assertNotIn("tools", sent[0])
         self.assertNotIn("reasoning_effort", sent[0])
+
+
+class PromptVariantTest(unittest.TestCase):
+    def test_resolver_defaults_to_v1(self):
+        self.assertEqual(pipeline.system_prompt(""), ("v1", pipeline.SYSTEM3))
+        self.assertEqual(pipeline.system_prompt(None), ("v1", pipeline.SYSTEM3))
+        self.assertEqual(pipeline.system_prompt("v1"), ("v1", pipeline.SYSTEM3))
+        self.assertEqual(pipeline.system_prompt("v2"), ("v2", pipeline.SYSTEM3_V2))
+        self.assertEqual(pipeline.system_prompt("v3"), ("v3", pipeline.SYSTEM3_V3))
+
+    def test_unknown_variant_falls_back_to_v1(self):
+        with self.assertLogs(pipeline.log, "WARNING"):
+            self.assertEqual(pipeline.system_prompt("v9"), ("v1", pipeline.SYSTEM3))
+
+    def test_all_variants_keep_the_json_contract(self):
+        for name in ("v1", "v2", "v3"):
+            text = pipeline.system_prompt(name)[1]
+            with self.subTest(variant=name):
+                self.assertIn('{"hold_ids": [1, 4, 7], "confidence": 0.95}', text)
+                self.assertIn("Always include the tapped hold", text)
+                self.assertIn("single inference pass", text)
+                self.assertIn("tape", text)
+
+    def test_real_photo_rules(self):
+        v2 = pipeline.system_prompt("v2")[1]
+        self.assertIn("Trust your eyes over the table", v2)  # tap color override
+        self.assertIn("Pale gray, white and beige", v2)  # pale-wall skepticism
+        self.assertIn("ignore brightness", v2)  # shadowed holds still count
+        v3 = pipeline.system_prompt("v3")[1]
+        self.assertIn("Trust your eyes over the table", v3)
+        self.assertIn("Pale gray, white and beige", v3)
+        self.assertIn("OTHER groups", v3)  # routes split across groups are merged
+        self.assertIn("through chains", v3)  # near is transitive, not just direct
+        self.assertIn("4 to 15 holds", v3)  # tiny answers are re-checked
+        self.assertNotIn("OTHER groups", pipeline.SYSTEM3)  # v1 is untouched
+
+    def test_run_once_sends_selected_variant_in_one_call(self):
+        cands = pipeline.add_neighbors(pipeline.group_by_color(candidates()), W, H)
+        for prompt, name, expected in (("", "v1", pipeline.SYSTEM3),
+                                       ("v2", "v2", pipeline.SYSTEM3_V2),
+                                       ("v3", "v3", pipeline.SYSTEM3_V3)):
+            with self.subTest(prompt=prompt or "default"):
+                spark = RunOnceTest().route_reply()
+                ids, info = pipeline.run_once(spark, wall(), cands, 0, prompt=prompt)
+                self.assertEqual(ids, [0, 1])
+                self.assertEqual(len(spark.seen), 1)  # still exactly one model call
+                self.assertEqual(spark.seen[0][0]["content"], expected)
+                self.assertEqual(info["prompt"], name)
+
+    def test_fallback_reports_variant_without_retry(self):
+        cands = pipeline.add_neighbors(pipeline.group_by_color(candidates()), W, H)
+        calls = []
+
+        def spark(messages):
+            calls.append(messages)
+            return {"text": "not json", "usage": {}}
+
+        ids, info = pipeline.run_once(spark, wall(), cands, 0, prompt="v3")
+        self.assertEqual(len(calls), 1)  # no retry
+        self.assertEqual(ids, [0, 1])  # the tapped hold's CV color group
+        self.assertEqual(info["prompt"], "v3")
+        self.assertEqual(info["fallback"], "not valid JSON")
+
+    def test_find_with_threads_prompt_and_traces_it(self):
+        jpeg = jpeg_of(wall())
+        tap = {"x": 230 / W, "y": 225 / H}
+
+        def post(body):
+            return {"output_text": "<0f>" + ",".join(record(i, box) for i, (box, _) in enumerate(HOLDS))}
+
+        spark = RunOnceTest().route_reply()
+        traces = []
+        holds = pipeline.find_with(sam.Sam(post), spark, jpeg, tap,
+                                   on_trace=traces.append, prompt="v2")
+        self.assertEqual(len(holds), 2)
+        self.assertEqual(spark.seen[0][0]["content"], pipeline.SYSTEM3_V2)
+        self.assertEqual(traces[0][2]["args"]["prompt"], "v2")
+        self.assertEqual(traces[0][2]["args"]["spark_calls"], 1)
+
+    def test_route_finder_honors_meta3_prompt_env(self):
+        jpeg = jpeg_of(wall())
+        tap = {"x": 230 / W, "y": 225 / H}
+        sent = []
+
+        def sam_post(body):
+            return {"output_text": "<0f>" + ",".join(record(i, box) for i, (box, _) in enumerate(HOLDS))}
+
+        def chat(body):
+            sent.append(body)
+            return {"choices": [{"message": {"content": json.dumps({"hold_ids": [0, 1],
+                                                                                  "confidence": 0.9})}}],
+                    "usage": {}}
+
+        with mock.patch.object(sam, "http_post", lambda env: sam_post), \
+                mock.patch.object(agent, "http_chat", lambda env: chat):
+            for env, expected in (({}, pipeline.SYSTEM3),  # default keeps v1
+                                  ({"META3_PROMPT": "v2"}, pipeline.SYSTEM3_V2),
+                                  ({"META3_PROMPT": "v3"}, pipeline.SYSTEM3_V3)):
+                with self.subTest(env=env):
+                    traces = []
+                    holds = pipeline.route_finder(env, on_trace=traces.append)(jpeg, tap)
+                    self.assertEqual(len(holds), 2)
+                    body = sent[-1]
+                    self.assertEqual(body["messages"][0]["content"], expected)
+                    self.assertEqual(body["temperature"], 0.2)
+                    self.assertIs(body["store"], False)
+                    self.assertNotIn("tools", body)
