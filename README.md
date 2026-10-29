@@ -111,6 +111,7 @@ Tests use a fake SAM and a fake Muse Spark, so they need no key. To call Meta Mo
 ```bash
 python -m topo_agent.sam photo.jpg "climbing hold"
 python -m topo_agent.eval --bench --methods color,sam_color,meta --seeds 11
+python -m topo_agent.eval --photos <dir> --methods color,sam_color,meta  # real photos: <case>.jpg + <case>.json pairs
 ```
 
 ## Contributing
