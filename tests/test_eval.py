@@ -74,6 +74,14 @@ class EvalTest(unittest.TestCase):
             photo_pair(d, polys=())
             with self.assertRaises(SystemExit):
                 hold_eval.photo_items(d)  # no truth holds
+        with tempfile.TemporaryDirectory() as d:
+            photo_pair(d, polys=(((20, 10), (40, 10), (30, 20)),))
+            with self.assertRaises(SystemExit):
+                hold_eval.photo_items(d)  # truth points in pixels, not fractions
+        with tempfile.TemporaryDirectory() as d:
+            photo_pair(d, tap=(0.9, 0.9))
+            with self.assertRaises(SystemExit):
+                hold_eval.photo_items(d)  # tap outside every truth hold
 
     def test_photo_items_loads_two_routes_from_one_image(self):
         with tempfile.TemporaryDirectory() as d:

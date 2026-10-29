@@ -153,11 +153,17 @@ def _photo_item(case, jpeg, tap, truth):
         pts = t.get("points") or []
         if len(pts) < 3:
             sys.exit(f"{case}: every truth hold needs at least 3 points")
+        if any(not isinstance(p, list) or len(p) != 2
+               or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in p)
+               or not all(0 <= v <= 1 for v in p) for p in pts):
+            sys.exit(f"{case}: truth points must be [x, y] fractions within 0-1 (not pixels)")
         xs, ys = [p[0] for p in pts], [p[1] for p in pts]
         marks.append({"kind": "hold", "use": "any", "x": sum(xs) / len(xs), "y": sum(ys) / len(ys),
                       "r": max(max(xs) - min(xs), max(ys) - min(ys)) / 2, "points": pts})
     if not marks:
         sys.exit(f"{case}: no truth holds")
+    if not any(_covers(m, x, y, width, height) for m in marks):
+        sys.exit(f"{case}: tap is not inside any truth hold")
     return {"id": case, "jpeg": jpeg, "tap": {"x": x, "y": y},
             "marks": {"marks": marks, "photo": {"width": width, "height": height}}}
 
