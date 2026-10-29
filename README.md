@@ -79,6 +79,29 @@ flowchart LR
 
 ## Results so far
 
+### Real gym photos: the real test, and our main work now
+
+8 labelled photos from a public indoor climbing dataset (CC BY-SA 4.0), one route per photo, scored with
+`python -m topo_agent.eval --photos` ([E9, E13, E15](docs/experiments.md)). One run each; runs wobble between sessions.
+
+| Method | Recall | Precision | Seconds / photo |
+|---|---|---|---|
+| **`meta`: SAM 3.1 + Muse Spark agent (on `main`)** | **49–60%** | **85%** | **29–33** |
+| Experimental single pass + DINOv2 hints (branch `feat/three-stage`, not on `main`) | 57% | 75% | 17 |
+
+Real photos are much harder than our drawn walls. What we learned ([learnings](docs/learnings.md)):
+- **It under-picks on dense walls:** the agent finds the right holds but stops early (worst case 3 of 20).
+  Misses are decisions, not blindness.
+- **It re-checks instead of trusting the candidate table**, zooming in again and again, so model turns take ~90% of
+  the time.
+- **Real light splits colors:** one route can measure as "green" and "gray", so color is a weaker hint than on drawn walls.
+
+The full run on all 68 routes of these photos is in progress, and so is the comparison with the pre-hackathon methods
+on the same photos. The [real-route leaderboard](docs/leaderboard.md) collects complete runs from the team's
+experiment server.
+
+### Drawn sample walls: our regression check
+
 Hard sample walls drawn by code ([`topo_agent/baseline/bench.py`](topo_agent/baseline/bench.py)): 9 scenes × 2 seeds,
 7 marked holds each (126 holds). One run per method.
 
@@ -95,14 +118,10 @@ Hard sample walls drawn by code ([`topo_agent/baseline/bench.py`](topo_agent/bas
 - The only miss is one washed-out hold that SAM did not segment (`light`).
 - Speed went from 36 s to 7.6 s per photo: the first message already carries a table of candidates (color, position,
   linked, gap), so clear cases are answered in one turn, and Muse Spark runs with `reasoning_effort: low`.
-- Caveat: these walls were also used while tuning the agent. Real gym photos (with the photographers' consent) and the
-  pre-hackathon Gemini agent are next in the same table.
+- Caveat: these walls were also used while tuning the agent, so they guard against regressions; they don't measure
+  the product. Real photos do.
 
-The [experiment log](docs/experiments.md) records later real-photo and speed studies,
-with detailed findings in [learnings](docs/learnings.md). The
-[real-route leaderboard](docs/leaderboard.md) is a repository snapshot of complete
-submissions to the team's experiment MCP server. It uses eight development photos and
-68 annotated routes; historical eight-route results in the experiment log are separate.
+Every experiment, including the ones that didn't work, is in the [experiment log](docs/experiments.md).
 
 ## Run it
 
