@@ -113,6 +113,10 @@ python -m topo_agent.sam photo.jpg "climbing hold"
 python -m topo_agent.eval --bench --methods color,sam_color,meta --seeds 11
 ```
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) (coding agents: [AGENTS.md](AGENTS.md)). Experiments and results are logged in [docs/experiments.md](docs/experiments.md).
+
 ## What was built during the hackathon
 
 Everything except `topo_agent/baseline/` was written during the hackathon (from Oct 27, 2026).
