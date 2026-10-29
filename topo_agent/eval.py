@@ -17,6 +17,12 @@ hold and the correct holds, all in fractions of the photo size:
 
     python -m topo_agent.eval --photos ~/data/realpairs --methods color,sam_color,meta
 
+A directory can also contain annotations.json with multiple routes per image:
+
+    {"images": [{"id": "wall", "file": "images/wall.jpg", "routes": [
+        {"route_id": "1", "tap": {"x": 0.5, "y": 0.5}, "truth": [{"points": [[0.1, 0.1], ...]}]}
+    ]}]}
+
 Only send photos you are allowed to share (your own gym, or a licensed set) to external AI APIs.
 
 - color      color only (pre-hackathon, no AI)
@@ -133,12 +139,65 @@ def by_scene(rows):
     return out
 
 
+def _photo_item(case, jpeg, tap, truth):
+    """Validate one route and convert its annotated polygons to evaluation marks."""
+    tap = tap or {}
+    x, y = tap.get("x"), tap.get("y")
+    if (not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (x, y))
+            or not (0 <= x <= 1 and 0 <= y <= 1)):
+        sys.exit(f"{case}: tap x/y must be numbers within 0-1")
+    with Image.open(io.BytesIO(jpeg)) as img:
+        width, height = img.size
+    marks = []
+    for t in truth or []:
+        pts = t.get("points") or []
+        if len(pts) < 3:
+            sys.exit(f"{case}: every truth hold needs at least 3 points")
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        marks.append({"kind": "hold", "use": "any", "x": sum(xs) / len(xs), "y": sum(ys) / len(ys),
+                      "r": max(max(xs) - min(xs), max(ys) - min(ys)) / 2, "points": pts})
+    if not marks:
+        sys.exit(f"{case}: no truth holds")
+    return {"id": case, "jpeg": jpeg, "tap": {"x": x, "y": y},
+            "marks": {"marks": marks, "photo": {"width": width, "height": height}}}
+
+
+def _manifest_items(base):
+    """Load several annotated routes from each image without duplicating the image file."""
+    with open(os.path.join(base, "annotations.json"), encoding="utf-8") as f:
+        manifest = json.load(f)
+    out, seen = [], set()
+    for image in manifest.get("images") or []:
+        image_id, relative = image.get("id"), image.get("file")
+        if not isinstance(image_id, str) or not image_id or not isinstance(relative, str):
+            sys.exit("annotations.json: every image needs an id and file")
+        path = os.path.abspath(os.path.join(base, relative))
+        if os.path.commonpath((base, path)) != base or not os.path.isfile(path):
+            sys.exit(f"annotations.json: missing or invalid image path: {relative}")
+        with open(path, "rb") as f:
+            jpeg = f.read()
+        for route in image.get("routes") or []:
+            route_id = route.get("route_id")
+            if not isinstance(route_id, (str, int)) or str(route_id) == "":
+                sys.exit(f"annotations.json: {image_id} has a route without route_id")
+            case = f"{image_id}_r{route_id}"
+            if case in seen:
+                sys.exit(f"annotations.json: duplicate route {case}")
+            seen.add(case)
+            out.append(_photo_item(case, jpeg, route.get("tap"), route.get("truth")))
+    if not out:
+        sys.exit("annotations.json: no annotated routes")
+    return out
+
+
 def photo_items(directory):
-    """Real-photo eval cases from <case>.jpg + <case>.json pairs (see the module docstring).
+    """Real-photo eval cases from a manifest or <case>.jpg + <case>.json pairs.
     Stops with an error message on the first bad case: the set is curated, so fail fast."""
     base = os.path.abspath(directory)
     if not os.path.isdir(base):
         sys.exit(f"no such photo directory: {directory}")
+    if os.path.isfile(os.path.join(base, "annotations.json")):
+        return _manifest_items(base)
     cases = sorted(f for f in os.listdir(base) if f.endswith(".json"))
     if not cases:
         sys.exit(f"no photo cases in {directory} (expected <case>.json next to <case>.jpg)")
@@ -156,25 +215,7 @@ def photo_items(directory):
             sys.exit(f"{case}: no photo (expected {name}.jpg next to it)")
         with open(os.path.join(base, case), encoding="utf-8") as f:
             data = json.load(f)
-        tap = data.get("tap") or {}
-        x, y = tap.get("x"), tap.get("y")
-        if (not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (x, y))
-                or not (0 <= x <= 1 and 0 <= y <= 1)):
-            sys.exit(f"{case}: tap x/y must be numbers within 0-1")
-        with Image.open(io.BytesIO(jpeg)) as img:
-            width, height = img.size
-        marks = []
-        for t in data.get("truth") or []:
-            pts = t.get("points") or []
-            if len(pts) < 3:
-                sys.exit(f"{case}: every truth hold needs at least 3 points")
-            xs, ys = [p[0] for p in pts], [p[1] for p in pts]
-            marks.append({"kind": "hold", "use": "any", "x": sum(xs) / len(xs), "y": sum(ys) / len(ys),
-                          "r": max(max(xs) - min(xs), max(ys) - min(ys)) / 2, "points": pts})
-        if not marks:
-            sys.exit(f"{case}: no truth holds")
-        out.append({"id": f"{os.path.basename(base)}-{name}", "jpeg": jpeg, "tap": {"x": x, "y": y},
-                    "marks": {"marks": marks, "photo": {"width": width, "height": height}}})
+        out.append(_photo_item(f"{os.path.basename(base)}-{name}", jpeg, data.get("tap"), data.get("truth")))
     return out
 
 

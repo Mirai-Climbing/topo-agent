@@ -75,6 +75,32 @@ class EvalTest(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 hold_eval.photo_items(d)  # no truth holds
 
+    def test_photo_items_loads_two_routes_from_one_image(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.mkdir(os.path.join(d, "images"))
+            img = Image.new("RGB", (200, 100), (10, 20, 30))
+            img.save(os.path.join(d, "images", "wall.jpg"), "JPEG")
+            route = {"tap": {"x": 0.15, "y": 0.15},
+                     "truth": [{"points": [[0.1, 0.1], [0.2, 0.1], [0.15, 0.2]]}]}
+            with open(os.path.join(d, "annotations.json"), "w", encoding="utf-8") as f:
+                json.dump({"images": [{"id": "wall", "file": "images/wall.jpg", "routes": [
+                    {"route_id": "1", **route}, {"route_id": "2", **route}]}]}, f)
+            items = hold_eval.photo_items(d)
+            self.assertEqual([item["id"] for item in items], ["wall_r1", "wall_r2"])
+            self.assertEqual([len(item["marks"]["marks"]) for item in items], [1, 1])
+            self.assertEqual(items[0]["jpeg"], items[1]["jpeg"])
+
+    def test_photo_items_rejects_duplicate_manifest_route(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.mkdir(os.path.join(d, "images"))
+            Image.new("RGB", (200, 100)).save(os.path.join(d, "images", "wall.jpg"), "JPEG")
+            route = {"route_id": "1", "tap": {"x": 0.15, "y": 0.15},
+                     "truth": [{"points": [[0.1, 0.1], [0.2, 0.1], [0.15, 0.2]]}]}
+            with open(os.path.join(d, "annotations.json"), "w", encoding="utf-8") as f:
+                json.dump({"images": [{"id": "wall", "file": "images/wall.jpg", "routes": [route, route]}]}, f)
+            with self.assertRaises(SystemExit):
+                hold_eval.photo_items(d)
+
 
 if __name__ == "__main__":
     unittest.main()
