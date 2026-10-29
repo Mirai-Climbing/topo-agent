@@ -25,6 +25,13 @@ hold chains to recover shadowed routes.
 Optionally (META3_EMBED=1), DINOv2 hold-crop embeddings add a per-hold top-similar
 list to the Spark table as a second similarity signal next to color. torch stays a
 lazy optional dependency: without it the pipeline silently runs without hints.
+
+Optionally (META3_VERIFY=1), a second Spark call re-checks the first answer for
+precision: close-up tiles of the answered holds (at most VERIFY_MAX_TILES, the tap
+plus the most questionable others) plus the tap close-up, asking only to drop holds
+that are bare wall, chalk dust, or clearly another color. The second answer must be
+a subset of the first; any failure keeps the first answer. Default off: with the
+flag unset the pipeline makes exactly one Spark call with byte-identical prompts.
 """
 import io
 import json
@@ -52,6 +59,11 @@ EMBED_MARGIN = 0.15  # crop grows past the outline by this fraction of its box
 EMBED_MEAN = (0.485, 0.456, 0.406)  # DINOv2 input normalization
 EMBED_STD = (0.229, 0.224, 0.225)
 EMBED_BATCH = 32  # crops per forward pass
+
+VERIFY_ENV = "META3_VERIFY"  # set to "1" for the drop-only second Spark call (default off)
+VERIFY_MAX_TILES = 12  # answered holds shown in the verify sheet at most (tap + most questionable)
+VERIFY_TILE = 256  # tile side in pixels, same as agent.Tools.look_closer
+VERIFY_COLS = 3  # sheet columns, same as agent.Tools.look_closer
 
 _DINO = None  # cached (model, device), loaded lazily so torch stays optional
 
@@ -163,6 +175,22 @@ Instructions:
 
 PROMPTS = {"v1": SYSTEM3, "v2": SYSTEM3_V2, "v3": SYSTEM3_V3}
 DEFAULT_PROMPT = "v1"
+
+SYSTEM_VERIFY = """You are verifying a climbing route answer, not finding a new route.
+
+Input: the first pass's route ids, close-up tiles of the answered holds (left to right,
+top to bottom; the tapped hold's tile is marked with a star), and a close-up of the
+tapped hold.
+
+Instructions:
+1. Drop any SHOWN hold that is bare wall, chalk dust, or clearly another color than the
+   tapped hold. Compare each tile with the tapped hold: hue decides, shadow or glare
+   alone never excludes a hold.
+2. Keep every hold you cannot see in the tiles or are unsure about. Never add holds;
+   you may only drop.
+3. Always include the tapped hold.
+4. Return only valid JSON, without explanations or intermediate reasoning:
+{"hold_ids": [1, 4, 7], "confidence": 0.95}"""
 
 
 def system_prompt(name):
@@ -289,6 +317,13 @@ def embed_enabled(env=None):
     if env is not None and EMBED_ENV in env:
         return str(env[EMBED_ENV]) == "1"
     return os.environ.get(EMBED_ENV) == "1"
+
+
+def verify_enabled(env=None):
+    """True when META3_VERIFY=1 (default off). An explicit env dict entry wins over os.environ."""
+    if env is not None and VERIFY_ENV in env:
+        return str(env[VERIFY_ENV]) == "1"
+    return os.environ.get(VERIFY_ENV) == "1"
 
 
 def hold_crop(img, cand, margin=EMBED_MARGIN, masked=True):
@@ -530,14 +565,119 @@ def run_once(spark, img, cands, tap_id, prompt=""):
                  "confidence": parsed["confidence"]}
 
 
+def select_verify_ids(cands, tap_id, ids, cap=VERIFY_MAX_TILES):
+    """The answered ids worth a close-up tile: the tap plus the most questionable others.
+
+    Answers up to cap are shown whole. Longer answers (over-picks) show the tap first
+    and fill the remaining tiles with the holds farthest in color from the tap, largest
+    first on ties: the ones a drop-only second pass is most likely to reject."""
+    ids = list(ids)
+    if len(ids) <= cap or cap <= 0:
+        return ids if cap > 0 else []
+    by_id = {c["id"]: c for c in cands}
+    tap = by_id.get(tap_id, {})
+    tap_hsv = tap.get("hsv", (0, 0, 0))
+
+    def suspicion(i):
+        c = by_id.get(i, {})
+        hsv = c.get("hsv", tap_hsv)
+        return (agent_mod.color_distance(hsv, tap_hsv), c.get("r", 0))
+
+    rest = sorted((i for i in ids if i != tap_id), key=suspicion, reverse=True)
+    return ([tap_id] if tap_id in ids else []) + rest[:cap - 1]
+
+
+def verify_sheet(img, cands, shown, tap_id):
+    """A look_closer-style crop sheet (JPEG) for the shown ids, or None when empty.
+
+    Same tiles as agent.Tools.look_closer (a zoomed crop per hold, id labels in a
+    3-column grid), but sized for up to VERIFY_MAX_TILES; the tap tile is starred."""
+    by_id = {c["id"]: c for c in cands}
+    ids = [i for i in shown if i in by_id][:VERIFY_MAX_TILES]
+    if not ids:
+        return None
+    base = img.convert("RGB")
+    W, H = base.size
+    font = agent_mod._font(24)
+    tiles = []
+    for i in ids:
+        c = by_id[i]
+        half = max(c["r"] * 2.5, 0.04) * W
+        box = (int(max(0, c["x"] * W - half)), int(max(0, c["y"] * H - half)),
+               int(min(W, c["x"] * W + half)), int(min(H, c["y"] * H + half)))
+        tile = base.crop(box).resize((VERIFY_TILE, VERIFY_TILE))
+        label = f"{i}*" if i == tap_id else str(i)
+        ImageDraw.Draw(tile).text((6, 4), label, fill=(255, 255, 255), font=font,
+                                  stroke_width=3, stroke_fill=(0, 0, 0))
+        tiles.append(tile)
+    cols = min(VERIFY_COLS, len(tiles))
+    rows = (len(tiles) + VERIFY_COLS - 1) // VERIFY_COLS
+    sheet = Image.new("RGB", (VERIFY_TILE * cols, VERIFY_TILE * rows), (0, 0, 0))
+    for k, tile in enumerate(tiles):
+        sheet.paste(tile, ((k % VERIFY_COLS) * VERIFY_TILE, (k // VERIFY_COLS) * VERIFY_TILE))
+    return agent_mod._jpeg(sheet)
+
+
+def verify_once(spark, img, cands, tap_id, ids):
+    """A second Spark call that only drops holds from a first answer. Returns (hold ids, info).
+
+    The model sees close-up tiles of the answered holds plus the tap close-up and may
+    only drop shown holds that are bare wall, chalk dust, or clearly another color;
+    its answer must be a subset of the first (the tap is always kept). info holds the
+    raw reply, token usage, the shown ids, the dropped count, and the fallback reason
+    ("" when the second answer was used). Never retries: on a Spark failure, invalid
+    JSON, or ids outside the first answer the first answer is kept."""
+    if not ids:
+        return [], {"text": "", "usage": {}, "shown": [], "dropped": 0, "fallback": "nothing to verify"}
+    known = {c["id"] for c in cands}
+    first = list(ids)
+    shown = select_verify_ids(cands, tap_id, first)
+    tap_name = next((c.get("color_name", "?") for c in cands if c["id"] == tap_id), "?")
+    content = [{"type": "text",
+                "text": (f"First pass route answer: {first} (tapped hold {tap_id}, {tap_name}).\n"
+                         f"Close-up tiles show {shown} left to right, top to bottom "
+                         f"(tap tile {tap_id}*); a tap close-up is also attached.\n"
+                         "Drop any shown hold that is bare wall, chalk dust, or clearly another "
+                         "color than the tap. Keep every answered hold you cannot see or are "
+                         "unsure about. Return the FULL corrected route as JSON.")}]
+    sheet = verify_sheet(img, cands, shown, tap_id)
+    if sheet:
+        content.append(agent_mod._image_part(sheet))
+    close_up, _ = agent_mod.Tools(img, cands, tap_id).look_closer([tap_id])
+    if close_up:
+        content.append(agent_mod._image_part(close_up))
+    messages = [{"role": "system", "content": SYSTEM_VERIFY}, {"role": "user", "content": content}]
+    try:
+        reply = spark(messages)
+    except Exception as err:
+        return first, {"text": "", "usage": {}, "shown": shown, "dropped": 0,
+                       "fallback": f"{type(err).__name__}: {str(err)[:200]}"}
+    text, usage = reply.get("text") or "", reply.get("usage") or {}
+    parsed = parse_answer(text, known)
+    if parsed["error"]:
+        return first, {"text": text, "usage": usage, "shown": shown, "dropped": 0,
+                       "fallback": parsed["error"]}
+    if any(i not in set(first) for i in parsed["ids"]):
+        return first, {"text": text, "usage": usage, "shown": shown, "dropped": 0,
+                       "fallback": "holds outside the first answer"}
+    final = agent_mod.clean_ids(parsed["ids"], known, tap_id)
+    return final, {"text": text, "usage": usage, "shown": shown,
+                   "dropped": len([i for i in first if i not in final]),
+                   "fallback": "", "confidence": parsed["confidence"]}
+
+
 def find_with(sam, spark, jpeg, point, on_trace=None, clock=time.monotonic,
-              prompt="", embedder=None, use_embed=None):
-    """(JPEG, point → holds) with injected SAM and Spark. Trace steps: (sam), (color), (spark), (post).
+              prompt="", embedder=None, use_embed=None, use_verify=None):
+    """(JPEG, point → holds) with injected SAM and Spark. Trace steps: (sam), (color), (spark), (post),
+    plus (embed) and (verify) when those passes are enabled.
 
     prompt selects the single-pass system prompt variant (v1, v2 or v3; default v1).
     use_embed adds DINOv2 similarity hints (an extra (embed) trace step); None reads
     META3_EMBED from the environment (default off). embedder is injectable for tests
-    (crops → vectors); embedding failures never break the pipeline, they skip the hints."""
+    (crops → vectors); embedding failures never break the pipeline, they skip the hints.
+    use_verify adds a drop-only second Spark call over close-up tiles of the answer
+    (an extra (verify) trace step with its own tokens); None reads META3_VERIFY from
+    the environment (default off, exactly one Spark call with unchanged prompts)."""
     started = clock()
     stats = {}
     try:
@@ -589,6 +729,20 @@ def find_with(sam, spark, jpeg, point, on_trace=None, clock=time.monotonic,
     if info.get("usage"):
         step["args"]["tokens"] = {k: v for k, v in info["usage"].items() if "token" in k}
     trace.append(step)
+    if (use_verify if use_verify is not None else verify_enabled()) and ids:
+        started = clock()
+        ids, vinfo = verify_once(spark, img, cands, tap_id, ids)
+        vstep = {"tool": "(verify)",
+                 "args": {"count": len(ids), "spark_calls": 1,
+                          "shown": len(vinfo.get("shown") or []), "dropped": vinfo.get("dropped", 0)},
+                 "ms": round((clock() - started) * 1000)}
+        if vinfo.get("fallback"):
+            vstep["args"]["fallback"] = vinfo["fallback"]
+        if vinfo.get("confidence") is not None:
+            vstep["args"]["confidence"] = vinfo["confidence"]
+        if vinfo.get("usage"):
+            vstep["args"]["tokens"] = {k: v for k, v in vinfo["usage"].items() if "token" in k}
+        trace.append(vstep)
     started = clock()
     holds = agent_mod._holds(cands, ids)
     trace.append({"tool": "(post)", "args": {"count": len(holds)}, "ms": round((clock() - started) * 1000)})
@@ -605,6 +759,7 @@ def route_finder(env, on_trace=None, embedder=None):
     call as find(jpeg, point, on_trace=...), to receive the per-stage steps.
     META3_PROMPT in env selects the single-pass system prompt variant (v1, v2 or v3).
     META3_EMBED=1 in env adds DINOv2 similarity hints (torch stays optional);
+    META3_VERIFY=1 in env adds the drop-only second Spark call over close-up tiles.
     embedder (crops → vectors) is injectable for tests."""
     post, chat = sam_mod.http_post(env), agent_mod.http_chat(env)
     if not (post and chat):
@@ -614,8 +769,9 @@ def route_finder(env, on_trace=None, embedder=None):
                         env.get("META_AGENT_EFFORT", agent_mod.EFFORT))
     prompt = env.get("META3_PROMPT", "")
     use_embed = embed_enabled(env)
+    use_verify = verify_enabled(env)
 
     def find(jpeg, point, on_trace=on_trace):
         return find_with(sam, spark, jpeg, point, on_trace, prompt=prompt,
-                         embedder=embedder, use_embed=use_embed)
+                         embedder=embedder, use_embed=use_embed, use_verify=use_verify)
     return find

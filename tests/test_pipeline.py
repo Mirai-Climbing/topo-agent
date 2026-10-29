@@ -569,3 +569,175 @@ class SpeedupTest(unittest.TestCase):
         self.assertLess(len(tiny), len(small))
         with Image.open(io.BytesIO(explicit)) as img:
             self.assertEqual(max(img.size), 800)  # an explicit side still wins
+
+
+class VerifyTest(unittest.TestCase):
+    def scripted(self, *bodies):
+        """Fake Spark serving one reply per call (an Exception body raises instead)."""
+        calls = []
+
+        def spark(messages):
+            calls.append(messages)
+            body = bodies[len(calls) - 1]
+            if isinstance(body, Exception):
+                raise body
+            return {"text": body, "usage": {"prompt_tokens": 50, "completion_tokens": 5}}
+
+        spark.calls = calls
+        return spark
+
+    def sam_post(self, body):
+        return {"output_text": "<0f>" + ",".join(record(i, box) for i, (box, _) in enumerate(HOLDS))}
+
+    def find(self, spark, **kwargs):
+        jpeg = jpeg_of(wall())
+        tap = {"x": 230 / W, "y": 225 / H}
+        traces = []
+        with mock.patch.dict(os.environ, {}, clear=True):
+            holds = pipeline.find_with(sam.Sam(self.sam_post), spark, jpeg, tap,
+                                       on_trace=traces.append, **kwargs)
+        return holds, traces[0], spark
+
+    def test_verify_enabled_defaults_off(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(pipeline.verify_enabled())
+            self.assertFalse(pipeline.verify_enabled({}))
+            self.assertTrue(pipeline.verify_enabled({"META3_VERIFY": "1"}))
+        with mock.patch.dict(os.environ, {"META3_VERIFY": "1"}):
+            self.assertTrue(pipeline.verify_enabled())
+            self.assertFalse(pipeline.verify_enabled({"META3_VERIFY": "0"}))  # explicit env wins
+
+    def test_select_verify_ids(self):
+        cands = many_cands()
+        self.assertEqual(pipeline.select_verify_ids(cands, 0, [0, 1, 2]), [0, 1, 2])  # short: whole
+        shown = pipeline.select_verify_ids(cands, 0, list(range(20)))
+        self.assertEqual(len(shown), 12)  # over-picks are capped
+        self.assertEqual(shown[0], 0)  # the tap always keeps its tile
+        self.assertEqual(shown, [0] + list(range(8, 19)))  # the blues: farthest from the red tap
+        self.assertEqual(pipeline.select_verify_ids(cands, 0, [0, 1], cap=0), [])
+
+    def test_verify_sheet_grid(self):
+        cands = many_cands(n=20)
+        with Image.open(io.BytesIO(pipeline.verify_sheet(wall(), cands, list(range(5)), 0))) as img:
+            self.assertEqual(img.size, (768, 512))  # 3 columns x 2 rows of 256px tiles
+        with Image.open(io.BytesIO(pipeline.verify_sheet(wall(), cands, list(range(12)), 0))) as img:
+            self.assertEqual(img.size, (768, 1024))
+        capped = pipeline.verify_sheet(wall(), cands, list(range(20)), 0)
+        with Image.open(io.BytesIO(capped)) as img:
+            self.assertEqual(img.size, (768, 1024))  # at most 12 tiles
+        self.assertIsNone(pipeline.verify_sheet(wall(), cands, [], 0))
+
+    def test_verify_drops_a_hold(self):
+        spark = self.scripted(json.dumps({"hold_ids": [0, 1, 2], "confidence": 0.8}),
+                              json.dumps({"hold_ids": [0, 1], "confidence": 0.9}))
+        holds, trace, _ = self.find(spark, use_verify=True)
+        self.assertEqual(len(holds), 2)  # the blue hold was dropped
+        self.assertEqual(len(spark.calls), 2)
+        self.assertEqual([s["tool"] for s in trace],
+                         ["(sam)", "(color)", "(spark)", "(verify)", "(post)"])
+        self.assertEqual(spark.calls[0][0]["content"], pipeline.SYSTEM3)  # first call is v1
+        self.assertEqual(len(spark.calls[0][1]["content"]), 4)  # table + photo + outlines + tap
+        self.assertEqual(spark.calls[1][0]["content"], pipeline.SYSTEM_VERIFY)
+        second = spark.calls[1][1]["content"]
+        self.assertEqual(len(second), 3)  # text + answer sheet + tap close-up
+        self.assertIn("First pass route answer: [0, 1, 2]", second[0]["text"])
+        vstep = trace[3]["args"]
+        self.assertEqual((vstep["count"], vstep["spark_calls"]), (2, 1))
+        self.assertEqual((vstep["shown"], vstep["dropped"]), (3, 1))
+        self.assertEqual(vstep["confidence"], 0.9)
+        self.assertEqual(vstep["tokens"], {"prompt_tokens": 50, "completion_tokens": 5})
+
+    def test_verify_failure_keeps_first_answer(self):
+        over = json.dumps({"hold_ids": [0, 1, 2], "confidence": 0.8})
+        for second, hint in (("not json", "not valid JSON"),  # invalid JSON: no retry
+                             (RuntimeError("503"), "503"),  # Spark down: no retry
+                             (json.dumps({"hold_ids": [0, 1], "confidence": 0.9}), "")):
+            with self.subTest(second=str(second)[:20]):
+                spark = self.scripted(over, second)
+                holds, trace, _ = self.find(spark, use_verify=True)
+                self.assertEqual(len(spark.calls), 2)
+                vstep = trace[3]["args"]
+                if hint:
+                    self.assertEqual(len(holds), 3)  # the first answer is kept whole
+                    if hint == "503":
+                        self.assertIn(hint, vstep["fallback"])  # "RuntimeError: 503"
+                    else:
+                        self.assertEqual(vstep["fallback"], hint)
+                    self.assertEqual(vstep["dropped"], 0)
+                else:
+                    self.assertEqual(len(holds), 2)
+                    self.assertNotIn("fallback", vstep)
+        spark = self.scripted(json.dumps({"hold_ids": [0, 1], "confidence": 0.8}),
+                              json.dumps({"hold_ids": [0, 1, 2], "confidence": 0.9}))
+        holds, trace, _ = self.find(spark, use_verify=True)
+        self.assertEqual(len(holds), 2)  # additions are rejected: verify is drop-only
+        self.assertEqual(trace[3]["args"]["fallback"], "holds outside the first answer")
+
+    def test_verify_keeps_tap_and_empty_is_safe(self):
+        cands = pipeline.add_neighbors(pipeline.group_by_color(candidates()), W, H)
+        spark = self.scripted(json.dumps({"hold_ids": [2], "confidence": 0.7}))
+        ids, info = pipeline.verify_once(spark, wall(), cands, 0, [0, 1, 2])
+        self.assertEqual(ids, [0, 2])  # the tap is re-added when the second answer omits it
+        self.assertEqual(info["dropped"], 1)
+        self.assertEqual(info["fallback"], "")
+        ids, info = pipeline.verify_once(spark, wall(), cands, 0, [])
+        self.assertEqual((ids, info["fallback"]), ([], "nothing to verify"))
+        self.assertEqual(len(spark.calls), 1)  # the empty answer made no new call
+
+    def test_default_path_unchanged(self):
+        def run(**kwargs):
+            return self.find(RunOnceTest().route_reply(), **kwargs)
+
+        _, default_trace, default_spark = run(use_verify=False)
+        self.assertEqual([s["tool"] for s in default_trace], ["(sam)", "(color)", "(spark)", "(post)"])
+        self.assertEqual(len(default_spark.seen), 1)
+        self.assertEqual(default_trace[2]["args"]["spark_calls"], 1)
+        _, env_trace, env_spark = run()  # flag unset reads the (cleared) environment
+        self.assertEqual(json.dumps(env_spark.seen), json.dumps(default_spark.seen))  # byte-identical
+        self.assertEqual([s["tool"] for s in env_trace], ["(sam)", "(color)", "(spark)", "(post)"])
+        _, on_trace, on_spark = run(use_verify=True)
+        self.assertEqual(json.dumps(on_spark.seen[0]),  # the first prompt never changes
+                         json.dumps(default_spark.seen[0]))
+        self.assertEqual([s["tool"] for s in on_trace],
+                         ["(sam)", "(color)", "(spark)", "(verify)", "(post)"])
+        with mock.patch.dict(os.environ, {"META3_VERIFY": "1"}, clear=True):
+            jpeg = jpeg_of(wall())
+            tap = {"x": 230 / W, "y": 225 / H}
+            spark = RunOnceTest().route_reply()
+            traces = []
+            pipeline.find_with(sam.Sam(self.sam_post), spark, jpeg, tap, on_trace=traces.append)
+            self.assertEqual(len(spark.seen), 2)  # None reads META3_VERIFY from the environment
+            cands = pipeline.add_neighbors(pipeline.group_by_color(candidates()), W, H)
+            one = RunOnceTest().route_reply()
+            pipeline.run_once(one, wall(), cands, 0)  # run_once itself stays a single call
+            self.assertEqual(len(one.seen), 1)
+
+    def test_route_finder_honors_meta3_verify_env(self):
+        jpeg = jpeg_of(wall())
+        tap = {"x": 230 / W, "y": 225 / H}
+        over = json.dumps({"hold_ids": [0, 1, 2], "confidence": 0.8})
+        kept = json.dumps({"hold_ids": [0, 1], "confidence": 0.9})
+        sent = []
+
+        def chat(body):
+            sent.append(body)
+            content = over if len(sent) == 1 else kept
+            return {"choices": [{"message": {"content": content}}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 2}}
+
+        with mock.patch.object(sam, "http_post", lambda env: self.sam_post), \
+                mock.patch.object(agent, "http_chat", lambda env: chat), \
+                mock.patch.dict(os.environ, {}, clear=True):
+            traces = []
+            holds = pipeline.route_finder({"META3_VERIFY": "1"}, on_trace=traces.append)(jpeg, tap)
+            self.assertEqual(len(holds), 2)  # verify dropped the blue hold
+            self.assertEqual(len(sent), 2)
+            self.assertEqual([s["tool"] for s in traces[0]],
+                             ["(sam)", "(color)", "(spark)", "(verify)", "(post)"])
+            self.assertEqual(traces[0][3]["args"]["dropped"], 1)
+            self.assertIn("prompt_tokens", traces[0][3]["args"]["tokens"])
+            sent.clear()
+            traces = []
+            holds = pipeline.route_finder({}, on_trace=traces.append)(jpeg, tap)
+            self.assertEqual(len(holds), 3)  # default keeps the over-pick
+            self.assertEqual(len(sent), 1)
