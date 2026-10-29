@@ -400,11 +400,43 @@ def fallback_ids(cands, tap_id):
                                {c["id"] for c in cands}, tap_id)
 
 
-def prompt_table(cands, tap_id):
-    """All holds as compact text: color features, groups, spatial neighbors and embed hints."""
+def prompt_cap():
+    """Max prompt rows, or None for the full table. TOPO_PRUNE_PROMPT=1 enables pruning (TOPO_PROMPT_MAX rows)."""
+    if not agent_mod._flag("TOPO_PRUNE_PROMPT"):
+        return None
+    return agent_mod._int_env("TOPO_PROMPT_MAX", 40)
+
+
+def select_prompt_cands(cands, tap_id, cap):
+    """The candidates worth a full prompt row: the tap's color group and spatial neighbors first.
+
+    The tap's whole color group is always kept (never split a route hypothesis); remaining rows
+    go to the spatially nearest other holds (tape routes span colors, so nearness beats color).
+    Id order is kept. cap <= 0 (or None, or fewer candidates than the cap) keeps everything."""
+    if cap is None or cap <= 0 or len(cands) <= cap:
+        return list(cands)
+    by_id = {c["id"]: c for c in cands}
+    tap = by_id[tap_id]
+    keep = {tap_id}
+    keep.update(c["id"] for c in cands if c["group"] == tap["group"])
+    keep.update(i for i in (tap.get("near") or []) if i in by_id)
+    if len(keep) < cap:
+        rest = sorted((c for c in cands if c["id"] not in keep),
+                      key=lambda c: (c["x"] - tap["x"]) ** 2 + (c["y"] - tap["y"]) ** 2)
+        for c in rest[:cap - len(keep)]:
+            keep.add(c["id"])
+    return sorted((by_id[i] for i in keep), key=lambda c: c["id"])
+
+
+def prompt_table(cands, tap_id, cap=None):
+    """All holds as compact text: color features, groups, spatial neighbors and embed hints.
+
+    With a cap, only the most relevant rows are shown (see select_prompt_cands); the full color
+    group listing still names every id, so the whole set stays countable and answerable."""
+    shown = select_prompt_cands(cands, tap_id, cap)
     show_embed = any(c.get("embed_top") for c in cands)
     rows = ["id | color | hue sat val | L a b | group | x y size | near" + (" | embed" if show_embed else "")]
-    for c in cands:
+    for c in shown:
         h, s, v = c["hsv"]
         lab = " ".join(str(v) for v in c["lab"])
         row = (f"{c['id']}{'*' if c['id'] == tap_id else ''} | {c['color_name']} | "
@@ -414,6 +446,9 @@ def prompt_table(cands, tap_id):
         if show_embed:
             row += f" | {','.join(f'{i}:{s:.2f}' for i, s in c.get('embed_top') or [])}"
         rows.append(row)
+    if len(shown) < len(cands):
+        rows.append(f"Showing {len(shown)} of {len(cands)} holds "
+                    f"(tap group and nearest first; every group is listed below).")
     groups = {}
     for c in cands:
         groups.setdefault(c["group"], []).append(c["id"])
@@ -472,9 +507,9 @@ def run_once(spark, img, cands, tap_id, prompt=""):
     the answer is the CV color group of the tap."""
     variant, system = system_prompt(prompt)
     small = img.convert("RGB").copy()
-    small.thumbnail((agent_mod.AI_SIDE, agent_mod.AI_SIDE))
+    small.thumbnail((agent_mod.ai_side(), agent_mod.ai_side()))
     close_up, _ = agent_mod.Tools(img, cands, tap_id).look_closer([tap_id])
-    content = [{"type": "text", "text": prompt_table(cands, tap_id)},
+    content = [{"type": "text", "text": prompt_table(cands, tap_id, prompt_cap())},
                agent_mod._image_part(agent_mod._jpeg(small)),
                agent_mod._image_part(agent_mod._jpeg(agent_mod.annotate(img, cands, tap_id)))]
     if close_up:
@@ -504,8 +539,9 @@ def find_with(sam, spark, jpeg, point, on_trace=None, clock=time.monotonic,
     META3_EMBED from the environment (default off). embedder is injectable for tests
     (crops → vectors); embedding failures never break the pipeline, they skip the hints."""
     started = clock()
+    stats = {}
     try:
-        img, cands, tap_id = agent_mod.prepare(sam, jpeg, point)
+        img, cands, tap_id = agent_mod.prepare(sam, jpeg, point, stats)
     except Exception as err:  # SAM did not answer: color only (pre-hackathon method)
         log.warning("route pipeline: SAM failed (%s: %s)", type(err).__name__, str(err)[:300])
         from topo_agent.baseline.gemini_agent import color_only
@@ -516,7 +552,7 @@ def find_with(sam, spark, jpeg, point, on_trace=None, clock=time.monotonic,
         if on_trace:
             on_trace(trace)
         return holds
-    trace = [{"tool": "(sam)", "args": {"count": len(cands), "sam_calls": 3},
+    trace = [{"tool": "(sam)", "args": {"count": len(cands), "sam_calls": stats.get("sam_calls", 3)},
               "ms": round((clock() - started) * 1000)}]
     if tap_id is None:
         if on_trace:
