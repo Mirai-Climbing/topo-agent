@@ -98,6 +98,12 @@ Hard sample walls drawn by code ([`topo_agent/baseline/bench.py`](topo_agent/bas
 - Caveat: these walls were also used while tuning the agent. Real gym photos (with the photographers' consent) and the
   pre-hackathon Gemini agent are next in the same table.
 
+The [experiment log](docs/experiments.md) records later real-photo and speed studies,
+with detailed findings in [learnings](docs/learnings.md). The
+[real-route leaderboard](docs/leaderboard.md) is a repository snapshot of complete
+submissions to the team's experiment MCP server. It uses eight development photos and
+68 annotated routes; historical eight-route results in the experiment log are separate.
+
 ## Run it
 
 ```bash
