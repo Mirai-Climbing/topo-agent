@@ -934,3 +934,172 @@ class ShortlistTest(unittest.TestCase):
                                           embedder=fake_embedder)(jpeg, tap)
             self.assertEqual(len(holds), 2)
             self.assertNotIn("(shortlist)", [s["tool"] for s in traces[0]])
+
+
+def rank_post(body):
+    return {"output_text": "<0f>" + ",".join(record(i, box) for i, (box, _) in enumerate(HOLDS))}
+
+
+RANK_TAP = {"x": 230 / W, "y": 225 / H}  # inside the first red hold
+
+
+def red_cand(i, x, y):
+    return {"id": i, "x": x, "y": y, "r": 0.03, "points": [], "conf": 0.9, "area": 0.001,
+            "hsv": (0.0, 0.8, 0.6), "lab": (50.0, 40.0, 10.0), "color_name": "red"}
+
+
+class RankTest(unittest.TestCase):
+    def test_color_sim_basics(self):
+        red, blue = candidates()[0]["hsv"], candidates()[2]["hsv"]
+        self.assertEqual(pipeline.color_sim(red, red), 1.0)
+        self.assertGreaterEqual(pipeline.color_sim(red, blue), 0.0)
+        self.assertLess(pipeline.color_sim(red, blue), 0.5)  # red and blue are far apart
+
+    def test_scores_follow_the_formula(self):
+        cands = candidates()
+        cos = {0: 1.0, 1: 0.5, 2: 0.0}
+        scores = pipeline.rank_scores(cands, 0, cos)
+        self.assertEqual(scores[0], 1.0)  # the tap's self-score
+        for i in (1, 2):
+            expected = pipeline.color_sim(cands[i]["hsv"], cands[0]["hsv"]) * (0.5 + 0.5 * cos[i])
+            self.assertAlmostEqual(scores[i], expected)
+        self.assertGreater(scores[1], scores[2])  # same color and closer embedding wins
+
+    def test_scores_without_cosines_are_color_only(self):
+        cands = candidates()
+        scores = pipeline.rank_scores(cands, 0)
+        for c in cands:
+            self.assertAlmostEqual(scores[c["id"]], pipeline.color_sim(c["hsv"], cands[0]["hsv"]))
+
+    def test_rank_cosines_to_tap_from_fake_vectors(self):
+        cos = pipeline.rank_cosines(wall(), candidates(), 0, embedder=fake_embedder)
+        self.assertEqual(cos[0], 1.0)
+        self.assertGreater(cos[1], 0.99)  # the other red
+        self.assertAlmostEqual(cos[2], 0.0)  # blue is orthogonal
+
+    def test_rank_cosines_rejects_a_wrong_count(self):
+        with self.assertRaises(ValueError):
+            pipeline.rank_cosines(wall(), candidates(), 0, embedder=lambda crops: [[1.0]])
+
+    def test_linking_chains_but_does_not_jump(self):
+        tap, mid, far, lone = red_cand(0, 0.1, 0.5), red_cand(1, 0.3, 0.5), \
+            red_cand(2, 0.5, 0.5), red_cand(3, 0.95, 0.5)
+        cands = [tap, mid, far, lone]  # tap-mid-far chain in LINK steps; lone is isolated
+        keep = {0, 1, 2, 3}
+        self.assertEqual(pipeline.rank_linked(cands, 0, keep, W, H), {0, 1, 2})
+        self.assertEqual(pipeline.rank_linked([tap, lone], 0, {0, 3}, W, H), {0})
+        self.assertEqual(pipeline.rank_linked(cands, 0, set(), W, H), {0})  # the tap always qualifies
+
+    def test_select_orders_scores_and_caps_holds(self):
+        cands = [red_cand(0, 0.1, 0.5), red_cand(5, 0.12, 0.5), red_cand(3, 0.14, 0.5)]
+        ids = pipeline.rank_select(cands, 0, W, H, cos_to_tap={0: 1.0, 5: 0.5, 3: 1.0})
+        self.assertEqual(ids, [0, 3, 5])  # tap first, then by score, ties by id
+        many = [red_cand(i, 0.05 + 0.01 * i, 0.5) for i in range(70)]  # one LINK-chained line
+        capped = pipeline.rank_select(many, 0, W, H)
+        self.assertEqual(len(capped), agent.MAX_HOLDS)
+        self.assertEqual(capped[0], 0)
+        self.assertEqual(capped, pipeline.rank_select(many, 0, W, H))  # deterministic
+
+    def test_select_always_includes_the_tap(self):
+        cands = candidates()
+        self.assertEqual(pipeline.rank_select(cands, 0, W, H, tap_frac=2.0), [0])
+
+    def run_rank(self, **kwargs):
+        traces = []
+        holds = pipeline.find_rank_with(sam.Sam(rank_post), jpeg_of(wall()), RANK_TAP,
+                                        on_trace=traces.append, **kwargs)
+        return holds, traces[0]
+
+    def test_find_ranks_the_tapped_route(self):
+        holds, trace = self.run_rank(embedder=fake_embedder)
+        self.assertEqual(len(holds), 2)  # the two reds, not the blue
+        self.assertEqual([s["tool"] for s in trace], ["(sam)", "(color)", "(embed)", "(rank)"])
+        self.assertEqual(trace[0]["args"]["count"], 3)
+        self.assertEqual(trace[2]["args"]["count"], 3)
+        self.assertEqual(trace[3]["args"]["count"], 2)
+        self.assertEqual(trace[3]["args"]["spark_calls"], 0)  # no model calls at all
+
+    def test_find_is_deterministic(self):
+        first, _ = self.run_rank(embedder=fake_embedder)
+        second, _ = self.run_rank(embedder=fake_embedder)
+        self.assertEqual(first, second)
+
+    def test_find_without_torch_scores_on_color_alone(self):
+        def no_torch(crops):
+            raise ImportError("no torch")
+
+        holds, trace = self.run_rank(embedder=no_torch)
+        self.assertEqual(len(holds), 2)  # the reds still win on color
+        self.assertEqual([s["tool"] for s in trace], ["(sam)", "(color)", "(rank)"])
+
+    def test_find_without_embedder_uses_color_alone(self):
+        with mock.patch.object(pipeline, "dino_embed", side_effect=ImportError("no torch")):
+            holds, trace = self.run_rank()  # the default path, offline: no torch, no network
+        self.assertEqual(len(holds), 2)
+        self.assertEqual([s["tool"] for s in trace], ["(sam)", "(color)", "(rank)"])
+
+    def test_find_with_embed_off_leaves_the_embedder_untouched(self):
+        def boom(crops):
+            raise AssertionError("must not be called")
+
+        holds, trace = self.run_rank(embedder=boom, use_embed=False)
+        self.assertEqual(len(holds), 2)
+        self.assertEqual([s["tool"] for s in trace], ["(sam)", "(color)", "(rank)"])
+
+    def test_find_embed_failure_drops_the_step(self):
+        def broken(crops):
+            raise RuntimeError("cuda busy")
+
+        holds, trace = self.run_rank(embedder=broken)
+        self.assertEqual(len(holds), 2)
+        self.assertEqual([s["tool"] for s in trace], ["(sam)", "(color)", "(rank)"])
+
+    def test_find_strict_fraction_keeps_only_the_tap(self):
+        holds, trace = self.run_rank(embedder=fake_embedder, tap_frac=1.0)
+        self.assertEqual(len(holds), 1)
+        self.assertAlmostEqual(holds[0]["x"], 230 / W, delta=0.05)
+
+    def test_find_survives_sam_failure(self):
+        def broken(body):
+            raise RuntimeError("503")
+
+        traces = []
+        holds = pipeline.find_rank_with(sam.Sam(broken), jpeg_of(wall()), RANK_TAP,
+                                        on_trace=traces.append)
+        self.assertTrue(holds)  # color only still finds the red problem
+        self.assertEqual(traces[0][-1]["tool"], "(fallback: color)")
+
+    def test_rank_finder_needs_a_sam_key(self):
+        self.assertIsNone(pipeline.rank_finder({}))
+
+    def test_rank_finder_never_touches_the_chat_api(self):
+        def boom(env):
+            raise AssertionError("the ranker makes no Spark calls")
+
+        with mock.patch.object(sam, "http_post", lambda env: rank_post), \
+                mock.patch.object(agent, "http_chat", boom):
+            find = pipeline.rank_finder({"MODEL_API_KEY": "x"}, embedder=fake_embedder)
+            holds = find(jpeg_of(wall()), RANK_TAP)
+        self.assertEqual(len(holds), 2)
+
+    def test_rank_finder_honors_env_knobs(self):
+        jpeg = jpeg_of(wall())
+        with mock.patch.object(sam, "http_post", lambda env: rank_post):
+            strict = pipeline.rank_finder({"MODEL_API_KEY": "x", "RANK_TAP_FRAC": "1.0"},
+                                          embedder=fake_embedder)(jpeg, RANK_TAP)
+            self.assertEqual(len(strict), 1)
+            bogus = pipeline.rank_finder({"MODEL_API_KEY": "x", "RANK_TAP_FRAC": "bogus"},
+                                         embedder=fake_embedder)(jpeg, RANK_TAP)
+            self.assertEqual(len(bogus), 2)  # a bad fraction falls back to the default
+            traces = []
+            color_only = pipeline.rank_finder({"MODEL_API_KEY": "x", "RANK_EMBED": "0"},
+                                              on_trace=traces.append,
+                                              embedder=fake_embedder)(jpeg, RANK_TAP)
+            self.assertEqual(len(color_only), 2)
+            self.assertNotIn("(embed)", [s["tool"] for s in traces[0]])
+
+    def test_rank_is_registered_in_eval(self):
+        from topo_agent import eval as hold_eval
+        with mock.patch.object(sam, "http_post", lambda env: rank_post):
+            self.assertIn("rank", hold_eval.finders({"MODEL_API_KEY": "x"}, ["rank"]))
+        self.assertEqual(hold_eval.finders({}, ["rank"]), {})  # skipped without a key
