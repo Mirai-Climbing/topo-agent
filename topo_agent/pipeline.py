@@ -25,6 +25,12 @@ hold chains to recover shadowed routes.
 Optionally (META3_EMBED=1), DINOv2 hold-crop embeddings add a per-hold top-similar
 list to the Spark table as a second similarity signal next to color. torch stays a
 lazy optional dependency: without it the pipeline silently runs without hints.
+
+rank_finder is a no-LLM alternative to the single Spark pass: each candidate scores
+color_sim * (0.5 + 0.5 * embed cosine to the tap) (DINOv2 when torch exists, color
+alone otherwise), holds scoring at least RANK_TAP_FRAC of the tap's self-score that
+chain to the tap via LINK gaps are kept. Deterministic, no model calls: a fast floor
+for how far zero-Spark scoring goes on real photos.
 """
 import io
 import json
@@ -618,4 +624,156 @@ def route_finder(env, on_trace=None, embedder=None):
     def find(jpeg, point, on_trace=on_trace):
         return find_with(sam, spark, jpeg, point, on_trace, prompt=prompt,
                          embedder=embedder, use_embed=use_embed)
+    return find
+
+
+RANK_TAP_FRAC = 0.5  # shortlist keeps candidates scoring at least this fraction of the tap's self-score
+RANK_FRAC_ENV = "RANK_TAP_FRAC"  # env override for the shortlist fraction
+RANK_EMBED_ENV = "RANK_EMBED"  # set to "0" to score on color alone (default tries DINOv2)
+
+
+def color_sim(a, b):
+    """Color similarity of two HSV triples (1 = same): one minus the agent's color distance, floored at 0."""
+    return max(0.0, 1.0 - agent_mod.color_distance(a, b))
+
+
+def rank_scores(cands, tap_id, cos_to_tap=None):
+    """Hybrid score per hold id: color_sim * (0.5 + 0.5 * embed cosine to the tap).
+
+    cos_to_tap maps id → cosine (DINOv2 when torch exists); holds without an entry
+    score on color alone (cosine 1.0). The tap's self-score is always 1.0."""
+    tap = next(c for c in cands if c["id"] == tap_id)
+    cos_to_tap = cos_to_tap or {}
+    out = {}
+    for c in cands:
+        cos = min(1.0, max(0.0, cos_to_tap.get(c["id"], 1.0)))
+        out[c["id"]] = color_sim(c["hsv"], tap["hsv"]) * (0.5 + 0.5 * cos)
+    return out
+
+
+def rank_cosines(img, cands, tap_id, embedder=None):
+    """Cosine of each hold's crop embedding to the tap's, as id → cosine.
+
+    The default embedder is DINOv2 over masked hold crops; pass a fake embedder
+    (crops → vectors) in tests. Raises ImportError without torch and ValueError
+    on a wrong vector count, so the caller can fall back to color-only scoring."""
+    run = embedder or dino_embed
+    embs = run([hold_crop(img, c) for c in cands])
+    if len(embs) != len(cands):
+        raise ValueError(f"embedder returned {len(embs)} vectors for {len(cands)} holds")
+    tap_vec = embs[next(i for i, c in enumerate(cands) if c["id"] == tap_id)]
+    return {c["id"]: _cosine(vec, tap_vec) for c, vec in zip(cands, embs)}
+
+
+def rank_linked(cands, tap_id, keep, width, height):
+    """Ids of keep reachable from the tap through keep (BFS over pairwise gaps).
+
+    The same gap-chaining idea as the agent's linked_ids, but over the score
+    shortlist instead of the SIMILAR color set: each step is at most LINK of the
+    photo's long side. The tap is always in the result, even outside keep."""
+    by_id = {c["id"]: c for c in cands}
+    side = max(width, height)
+    found, todo = {tap_id}, [by_id[tap_id]]
+    while todo:
+        a = todo.pop()
+        for c in cands:
+            if c["id"] in keep and c["id"] not in found and math.hypot(
+                    (a["x"] - c["x"]) * width, (a["y"] - c["y"]) * height) <= agent_mod.LINK * side:
+                found.add(c["id"])
+                todo.append(c)
+    return found
+
+
+def rank_select(cands, tap_id, width, height, tap_frac=RANK_TAP_FRAC, cos_to_tap=None):
+    """Ordered answer ids without any model call: score, threshold, link, cap.
+
+    Keeps candidates scoring at least tap_frac of the tap's self-score that chain to
+    the tap via LINK gaps (the tap always qualifies). Tap first, the rest by score,
+    at most MAX_HOLDS. Deterministic: pure scoring, no temperature, ties break by id."""
+    scores = rank_scores(cands, tap_id, cos_to_tap)
+    short = {i for i, s in scores.items() if s >= tap_frac * scores[tap_id]}
+    rest = sorted((i for i in rank_linked(cands, tap_id, short, width, height) if i != tap_id),
+                  key=lambda i: (-scores[i], i))
+    return agent_mod.clean_ids([tap_id] + rest, {c["id"] for c in cands}, tap_id)
+
+
+def find_rank_with(sam, jpeg, point, on_trace=None, clock=time.monotonic,
+                   embedder=None, use_embed=True, tap_frac=RANK_TAP_FRAC):
+    """(JPEG, point → holds) with injected SAM and no model calls at all.
+
+    Trace steps: (sam), (color), [(embed)], (rank). The (embed) step appears only when
+    crop embeddings were computed (DINOv2 when torch exists; without torch, or when
+    use_embed is false, the ranker scores on color alone). embedder is injectable for
+    tests (crops → vectors); embedding failures never break the ranker, they drop the
+    (embed) step. Deterministic: no temperature, no sampling. On a SAM failure the
+    answer falls back to the pre-hackathon color-only method, like find_with."""
+    started = clock()
+    stats = {}
+    try:
+        img, cands, tap_id = agent_mod.prepare(sam, jpeg, point, stats)
+    except Exception as err:  # SAM did not answer: color only (pre-hackathon method)
+        log.warning("rank finder: SAM failed (%s: %s)", type(err).__name__, str(err)[:300])
+        from topo_agent.baseline.gemini_agent import color_only
+        with Image.open(io.BytesIO(jpeg)) as raw:
+            holds = color_only(raw.convert("RGB"), point)
+        trace = [{"tool": "(error)", "result": f"{type(err).__name__}: {str(err)[:200]}"},
+                 {"tool": "(fallback: color)", "args": {"count": len(holds)}}]
+        if on_trace:
+            on_trace(trace)
+        return holds
+    trace = [{"tool": "(sam)", "args": {"count": len(cands), "sam_calls": stats.get("sam_calls", 3)},
+              "ms": round((clock() - started) * 1000)}]
+    if tap_id is None:
+        if on_trace:
+            on_trace(trace)
+        return []
+    started = clock()
+    classify_colors(img, cands)
+    trace.append({"tool": "(color)", "args": {"count": len(cands)},
+                  "ms": round((clock() - started) * 1000)})
+    cos = None
+    if use_embed:
+        started = clock()
+        try:
+            cos = rank_cosines(img, cands, tap_id, embedder=embedder)
+        except ImportError:  # torch is optional: silently score on color alone
+            cos = None
+        except Exception as err:
+            log.warning("rank finder: embeddings failed (%s: %s)", type(err).__name__, str(err)[:300])
+            cos = None
+        else:
+            trace.append({"tool": "(embed)", "args": {"count": len(cos)},
+                          "ms": round((clock() - started) * 1000)})
+    started = clock()
+    holds = agent_mod._holds(cands, rank_select(cands, tap_id, img.width, img.height, tap_frac, cos))
+    trace.append({"tool": "(rank)", "args": {"count": len(holds), "spark_calls": 0},
+                  "ms": round((clock() - started) * 1000)})
+    log.info("rank finder: %s", json.dumps(trace, ensure_ascii=False))
+    if on_trace:
+        on_trace(trace)
+    return holds
+
+
+def rank_finder(env, on_trace=None, embedder=None):
+    """Find holds with the no-LLM hybrid ranker (SAM + color × embedding scores).
+
+    (JPEG, point → holds), or None without a SAM key. No Spark calls at all: each
+    candidate scores color_sim * (0.5 + 0.5 * embed cosine to the tap) (DINOv2 when
+    torch is installed, color alone otherwise); holds scoring at least RANK_TAP_FRAC
+    (default 0.5, RANK_TAP_FRAC in env overrides) of the tap's self-score that chain
+    to the tap via LINK gaps are kept. RANK_EMBED=0 in env scores on color alone.
+    Deterministic (no temperature). embedder (crops → vectors) is injectable for tests."""
+    post = sam_mod.http_post(env)
+    if not post:
+        return None
+    sam = sam_mod.Sam(post)
+    try:
+        tap_frac = float(env.get(RANK_FRAC_ENV, RANK_TAP_FRAC))
+    except (TypeError, ValueError):
+        tap_frac = RANK_TAP_FRAC
+    use_embed = str(env.get(RANK_EMBED_ENV, "1")) != "0"
+
+    def find(jpeg, point, on_trace=on_trace):
+        return find_rank_with(sam, jpeg, point, on_trace, embedder=embedder,
+                              use_embed=use_embed, tap_frac=tap_frac)
     return find

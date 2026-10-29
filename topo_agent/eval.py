@@ -15,6 +15,7 @@ Hard sample walls (--bench, topo_agent/baseline/bench.py) are drawn by code, so 
 - sam_color  SAM 3.1 candidates filtered by color only (no AI judgement)
 - meta       topo agent (SAM 3.1 + Muse Spark)
 - meta3      three-stage pipeline (SAM + CV colors + single-pass Muse Spark, no ReAct loop)
+- rank       no-LLM hybrid ranker (SAM + color x embedding scores, the fast floor)
 
 Real problems from the app database are scored by mirai-climbing-v2's server/hold_eval.py
 (only photos from users who agreed are sent to external AI APIs).
@@ -65,7 +66,7 @@ def finders(env, names):
     """Method name → function (JPEG, point → holds). Methods without settings (API keys) are skipped."""
     from topo_agent.agent import meta_hold_finder, sam_color_finder
     from topo_agent.baseline.gemini_agent import color_only, gemini_hold_finder
-    from topo_agent.pipeline import route_finder
+    from topo_agent.pipeline import rank_finder, route_finder
 
     def color(jpeg, point):
         with Image.open(io.BytesIO(jpeg)) as img:
@@ -73,7 +74,7 @@ def finders(env, names):
 
     made = {"color": lambda: color, "gemini": lambda: gemini_hold_finder(env),
             "sam_color": lambda: sam_color_finder(env), "meta": lambda: meta_hold_finder(env),
-            "meta3": lambda: route_finder(env)}
+            "meta3": lambda: route_finder(env), "rank": lambda: rank_finder(env)}
     out = {}
     for name in names:
         f = made[name]() if name in made else None
@@ -148,7 +149,7 @@ def bench(env, names, scenes=None, seeds=(11, 12)):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Score hold finders")
-    ap.add_argument("--methods", default="color", help="comma separated: color,gemini,sam_color,meta,meta3")
+    ap.add_argument("--methods", default="color", help="comma separated: color,gemini,sam_color,meta,meta3,rank")
     ap.add_argument("--bench", action="store_true", help="score on the hard sample walls (topo_agent/baseline/bench.py)")
     ap.add_argument("--scenes", default="", help="only these sample wall scenes (comma separated, e.g. light,twins)")
     ap.add_argument("--seeds", default="11,12", help="sample wall seeds (comma separated)")
