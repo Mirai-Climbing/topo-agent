@@ -7,8 +7,17 @@ Thanks for helping! These are the team's working rules for the Meta Global AI De
 
 - Work on a branch and open a pull request into `main`. Don't push to `main` directly (it is protected).
 - Keep PRs small and focused: one idea per PR.
-- Yuzuki reviews and merges. We merge with **merge commits, not squash**: the commit history shows
-  what was built during the hackathon, so keep it.
+- We merge with **merge commits, not squash**: the commit history shows what was built during the
+  hackathon, so keep it.
+
+## Reviews
+
+- Every PR gets a reviewer from the team: Yuzuki reviews Siho's PRs, and Siho reviews Yuzuki's.
+- Request a review on GitHub for PRs that change the agent or the evaluation code.
+- Docs-only PRs and urgent fixes may be merged without waiting for a review.
+- If a review request gets no response in about 12 hours, the author may merge, and the reviewer
+  reviews the changes afterwards. Fixes from a late review go in a new PR.
+- A reviewer who asks for changes re-reviews once they are pushed, so the PR isn't left blocked.
 - Write everything in English: code comments, docs, commit messages, PR descriptions.
   Yuzuki keeps `README.ja.md` in sync.
 
