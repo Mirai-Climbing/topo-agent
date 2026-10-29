@@ -58,12 +58,16 @@ seeds 11 and 12 give 18 walls, 126 holds). They were also used while tuning, so 
   the washed-out hold in `light` seed 11 that SAM never segmented.
 - **Takeaways:** next are real photos (these walls were used for tuning) and SAM misses.
 
-## E6: Real gym photos (in progress, Siho, PR #3)
+## E6: Real gym photos (2026-10-30, Siho, PR #3)
 - **Question:** how do SAM 3.1 and the agent do on real gym photos?
 - **Setup:** `--photos` with a multi-route `annotations.json`; 8 labelled images / 68 routes derived from a Kaggle
   indoor climbing hold dataset (CC BY-SA 4.0). Photos stay out of git for now and are shared from Siho's
-  experiment server.
-- **Results:** full 68-route run pending; the initial 8-route subset is detailed in E9 below.
+  experiment server. One run each, same session; server-rescored on the team leaderboard.
+- **Results:** meta (ReAct, 6 turns) 60% / 68% / 30.9 s (F1 0.639, 353/517/587); meta3 (single-pass v1)
+  54% / 46% / 12.7 s (F1 0.501); meta3-winner (v3 prompt + DINOv2 hints + prune) 57% / 57% / 16.1 s
+  (F1 0.569). The initial 8-route subset is detailed in E9 below.
+- **Takeaways:** single-pass halves agent time at -3pp recall / -11pp precision; the 8-case subset
+  overstated precision gaps, so judge on all 68; dense walls (0074: 3/20) are the worst case.
 
 The following detailed studies were recorded before this shared log existed. Their
 dates show when the runs happened; their E numbers follow the order added to this log.
