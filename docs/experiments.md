@@ -1,10 +1,75 @@
-# Experiment log
+# Experiments
 
-Tuning experiments on the topo agent: what was tried, what was measured, and what was decided.
-Check this file before re-trying an optimization. One run per case unless noted; the agent is
-stochastic (`temperature` 0.2), so treat small differences with care.
+What we tried, how, what happened, and what we learned. Newest at the bottom. Failed ideas belong here too.
 
-## 2026-10-27: Turn-budget optimization
+Recall and precision come from `topo_agent.eval` (a found hold counts when one center lies inside the other's
+outline). "Drawn walls" are the hard sample walls in `topo_agent/baseline/bench.py` (9 scenes × 7 marked holds;
+seeds 11 and 12 give 18 walls, 126 holds). They were also used while tuning, so real photos are the real test.
+
+## Template
+
+```markdown
+## E<n>: <short title> (<date>, <author>, <commit or PR>)
+- **Question:** what we wanted to know
+- **Setup:** data, methods, command, settings
+- **Results:** numbers (recall / precision / seconds), per scene if useful
+- **Takeaways:** what we keep, what we drop, what to try next
+```
+
+## E1: Color-only baseline on drawn walls (2026-10-27, Yuzuki, f52900a)
+- **Question:** how good is the pre-hackathon color method?
+- **Setup:** `--bench --methods color --seeds 11,12`
+- **Results:** recall 85%, precision 96%, 0.8 s. Weak scenes: `twins` (same color on the next wall) recall 57%,
+  `tape` (holds of mixed colors marked by tape) recall 14% / precision 33%.
+- **Takeaways:** color can't tell problems apart when the color repeats elsewhere or doesn't mark the problem at all.
+
+## E2: SAM 3.1 candidates (2026-10-27, Yuzuki, dc23afb)
+- **Question:** does SAM 3.1 find the holds, and what does its output look like?
+- **Setup:** Responses API, concept prompt `climbing hold`, on `twins` and `tape` (seed 11). Point prompt at the tap.
+- **Results:** 34 and 29 candidates; all 7 marked holds were among them in both. Confidence only 0.77–0.90, so it
+  can't separate problems. 2–5 s per request. A point prompt must start with `<0f>1` (otherwise HTTP 400).
+  Without `store: false` the response is stored at Meta.
+- **Takeaways:** SAM finds holds well; choosing *which* holds belong together is the agent's job.
+
+## E3: First Muse Spark agent (2026-10-27, Yuzuki, e3d2ee0)
+- **Question:** can an agent with tools beat color on the hard scenes?
+- **Setup:** tools `inspect_candidates`, `find_similar`, `look_closer`, `submit_holds`; default reasoning effort;
+  `--bench --methods color,sam_color,meta --seeds 11` (9 walls).
+- **Results:** color 89% / 97% / 0.9 s; sam_color 90% / 85% / 2.1 s; **meta 94% / 100% / 36 s**.
+  `tape` 100% (color 14%). `twins` 4/7 (7/7 in a separate single run: high variance). `light` 6/7: SAM missed a
+  washed-out hold.
+- **Takeaways:** the agent wins where color fails and adds nothing from other problems, but 36 s is too slow.
+
+## E4: Faster agent (2026-10-28, Yuzuki, aba31c1)
+- **Question:** can we cut the number of model turns?
+- **Setup:** send a table of the candidates closest in color (color, position, size, linked) in the first message;
+  `reasoning_effort: low` (reasoning tokens 732 → 297 on a small test prompt); 18 walls.
+- **Results:** meta 94% / 100% / **6.1 s**. With the table alone, `tape` broke (2/7): the agent trusted the colors.
+  Adding a close-up of the tapped hold and "check for tape first" fixed it (7/7). New failure: `twins` seed 12
+  found only the tapped hold, because the tap was the far end of its problem and nothing was "linked".
+- **Takeaways:** most clear cases need one turn. Hints steer the agent strongly, so they must not be wrong.
+
+## E5: Linked chain and second look (2026-10-28, Yuzuki, b266a14)
+- **Question:** fix the `twins` misses without losing precision.
+- **Setup:** linked = same-color chain with gaps up to 30% of the photo; if the chain has fewer than 3 holds, jump to
+  the nearest same color; a `gap` column; answers with fewer than 3 holds are sent back once; a text-only reply is
+  reminded once. 18 walls.
+- **Results:** color 85% / 96% / 0.8 s; sam_color 90% / 86% / 1.8 s; **meta 99% / 100% / 7.6 s**. The only miss is
+  the washed-out hold in `light` seed 11 that SAM never segmented.
+- **Takeaways:** next are real photos (these walls were used for tuning) and SAM misses.
+
+## E6: Real gym photos (in progress, Siho, PR #3)
+- **Question:** how do SAM 3.1 and the agent do on real gym photos?
+- **Setup:** `--photos` with a multi-route `annotations.json`; 8 labelled images / 68 routes derived from a Kaggle
+  indoor climbing hold dataset (CC BY-SA 4.0). Photos stay out of git for now and are shared from Siho's
+  experiment server.
+- **Results:** full 68-route run pending; the initial 8-route subset is detailed in E9 below.
+
+The following detailed studies were recorded before this shared log existed. Their
+dates show when the runs happened; their E numbers follow the order added to this log.
+Results on eight selected routes are separate from the full 68-route leaderboard.
+
+## E7: Turn-budget optimization (2026-10-27, PR #5)
 
 Goal: cut `meta` wall time on a real gym photo (956x1054, 86 SAM candidates). A trace showed
 27.4 s in 3 Muse Spark turns vs 3.8 s in SAM: turns are ~90% of the time.
@@ -27,7 +92,7 @@ Kept (structural caps, no policy change):
 - `MAX_LOOKS` = 2 `look_closer` calls per run (each call appends an image to every later turn).
 - Tests: default turn cap, per-run look cap (`tests/test_agent.py`).
 
-## 2026-10-27: Image diet
+## E8: Image diet (2026-10-27, PR #5)
 
 Knobs (all optional, defaults unchanged): `META_AGENT_MODEL`, `META_AGENT_EFFORT`,
 `META_AGENT_IMAGE_SIDE` (1280), `META_AGENT_JPEG_QUALITY` (85).
@@ -45,7 +110,7 @@ Rejected: less detail means more turns (tape: base 2 turns + 1 `look_closer` vs 
 low answers wobble between runs (6 vs 8 holds on tape). Payload bytes were measured without
 API calls; bench numbers above used the real APIs.
 
-## 2026-10-28: Real-photo subset bench (meta)
+## E9: Real-photo subset bench (meta) (2026-10-28, PR #5)
 
 First real-photo scores: 8 Kaggle route cases (largest route per image), `--photos` mode,
 team code (6-turn cap):
@@ -65,7 +130,7 @@ team code (6-turn cap):
 Re-runs wobble (0457: 7 → 14 hits; 0917: 11 → 9). All 8 traces saved with the overlays;
 analysis in [learnings.md](learnings.md).
 
-## 2026-10-28: SAM phrase grounding
+## E10: SAM phrase grounding (2026-10-28, PR #5)
 
 Color- and tape-qualified concept prompts on a real gym photo (assets/119720094.2.jpg):
 
@@ -79,7 +144,7 @@ Color- and tape-qualified concept prompts on a real gym photo (assets/119720094.
 Color adjectives ground well enough for hints; tape needs the longer phrase plus
 color+adjacency filtering. Detail in [learnings.md](learnings.md).
 
-## 2026-10-28: Three-stage pipeline (meta3) vs ReAct agent (meta)
+## E11: Three-stage pipeline (meta3) vs ReAct agent (meta) (2026-10-28, PR #5)
 
 Same 8 Kaggle route cases, one run each. `meta` numbers from the earlier run (team
 6-turn code); `meta3` = SAM + CV color grouping + single-pass Spark (`feat/three-stage`).
@@ -103,7 +168,7 @@ post ~0 s. Spark prompts 3.3k-11.5k tokens (110 candidates on 0074), completions
 Zero fallbacks: all 8 replies were valid JSON holding the tapped route.
 Analysis in [learnings.md](learnings.md).
 
-## 2026-10-28: Synth bench with meta3 (9 scenes x seeds 11, 12)
+## E12: Synth bench with meta3 (9 scenes x seeds 11, 12) (2026-10-28, PR #5)
 
 Same run, team 6-turn code, one run per method. Traces and raw replies saved under
 `out/three-stage-synth/`.
@@ -118,7 +183,7 @@ Same run, team 6-turn code, one run per method. Traces and raw replies saved und
 other scenes 7/7. Stage means: SAM 1.5 s, CV colors 0.4 s, Spark 10.3 s.
 Analysis in [learnings.md](learnings.md).
 
-## 2026-10-28: Tap-only meta3 re-run (equal criteria, same session)
+## E13: Tap-only meta3 re-run (equal criteria, same session) (2026-10-28, PR #5)
 
 v1 asked for ALL routes (unfair task vs the agent's tap-only question, temperature 0,
 no tap close-up). v2 fixes all three and re-runs both methods in one session.
@@ -152,7 +217,7 @@ Real (8 cases, same session):
 `meta3` stages: SAM 2.9 s, CV 0.4 s, Spark 7.8 s (was 15.2 s), zero fallbacks.
 Note the baseline wobble: same code scored 49%/85%/33.3 s last session.
 
-## 2026-10-28: DINOv2 hold embeddings vs HSV (local retrieval, no API)
+## E14: DINOv2 hold embeddings vs HSV (local retrieval, no API) (2026-10-28, PR #5)
 
 Leave-one-hold-out nearest neighbor: is the closest other hold on the same image
 from the same route? GT holds of all 68 routes (587 holds), DINOv2 ViT-S/14
@@ -174,7 +239,7 @@ results `out/embed-proto/retrieval.json`.
 Masked crops (background blacked out) beat bbox slightly overall. torch 2.14+cu126
 installed in project `.venv` (local GPU RTX 3080 Ti); not yet a repo dependency.
 
-## 2026-10-29: Subagent optimization sprint on 8 real photos (v3 matrix)
+## E15: Subagent optimization sprint on 8 real photos (v3 matrix) (2026-10-29, PR #5)
 
 Three parallel subagents (own worktrees, merged to `feat/three-stage`): prompt
 variants v2/v3 (`META3_PROMPT`), DINOv2 embed hints (`META3_EMBED=1`), latency
