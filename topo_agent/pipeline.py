@@ -16,14 +16,19 @@ The trace records the latency of each stage separately (sam, color, spark, post)
 the API call counts and token usage when the API reports it. There are no retries:
 on a Spark failure or invalid JSON the answer falls back to the tapped hold's CV
 color group, and on a SAM failure to the pre-hackathon color-only method.
+
+Optionally (META3_EMBED=1), DINOv2 hold-crop embeddings add a per-hold top-similar
+list to the Spark table as a second similarity signal next to color. torch stays a
+lazy optional dependency: without it the pipeline silently runs without hints.
 """
 import io
 import json
 import logging
 import math
+import os
 import time
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from topo_agent import agent as agent_mod
 from topo_agent import sam as sam_mod
@@ -34,6 +39,16 @@ log = logging.getLogger(__name__)
 SHRINK = 0.85  # outlines are shrunk toward their center for color sampling (excludes mask-boundary pixels)
 MIN_PIXELS = 5  # fewer inside pixels than this: sample the unshrunk outline instead
 TEMPERATURE = 0.2  # same as the ReAct agent (agent.py); only the reasoning path differs, not the sampling
+EMBED_ENV = "META3_EMBED"  # set to "1" to add DINOv2 similarity hints to the Spark table (default off)
+EMBED_MODEL = "dinov2_vits14"  # small DINOv2, fetched from the torch hub cache on first use
+EMBED_SIZE = 224  # DINOv2 input side (pixels)
+EMBED_TOP_K = 3  # similar holds listed per row (ids with cosine scores)
+EMBED_MARGIN = 0.15  # crop grows past the outline by this fraction of its box
+EMBED_MEAN = (0.485, 0.456, 0.406)  # DINOv2 input normalization
+EMBED_STD = (0.229, 0.224, 0.225)
+EMBED_BATCH = 32  # crops per forward pass
+
+_DINO = None  # cached (model, device), loaded lazily so torch stays optional
 
 SYSTEM3 = """You are a climbing route grouping engine, not an exploratory agent.
 
@@ -41,8 +56,8 @@ Task: find every hold of the same route as the tapped hold (marked * in the tabl
 
 Input: hold ids, positions (x, y, size on a 0-1000 scale), precomputed colors (names, HSV and
 CIELAB features you must trust, not recompute), color similarity groups, same-group spatial
-neighbors, the wall photo, a second image where every hold is outlined and numbered, and a
-close-up of the tapped hold.
+neighbors, optional visual-embedding hints (the embed column, when present), the wall photo,
+a second image where every hold is outlined and numbered, and a close-up of the tapped hold.
 
 Instructions:
 1. Answer in a single inference pass. Find ONLY the tapped hold's route, not the other routes.
@@ -56,7 +71,9 @@ Instructions:
 6. When in doubt about a same-color hold on the same wall, include it. Exclude holds that
    are clearly a different color or on a different wall.
 7. Return only valid JSON, without explanations or intermediate reasoning:
-{"hold_ids": [1, 4, 7], "confidence": 0.95}"""
+{"hold_ids": [1, 4, 7], "confidence": 0.95}
+8. When the embed column is present, treat it as a visual-similarity hint only: same-route
+   holds usually rank each other high, but color, tape and wall position decide."""
 
 
 def rgb_to_lab(rgb):
@@ -167,6 +184,115 @@ def add_neighbors(cands, width, height):
     return cands
 
 
+def embed_enabled(env=None):
+    """True when META3_EMBED=1 (default off). An explicit env dict entry wins over os.environ."""
+    if env is not None and EMBED_ENV in env:
+        return str(env[EMBED_ENV]) == "1"
+    return os.environ.get(EMBED_ENV) == "1"
+
+
+def hold_crop(img, cand, margin=EMBED_MARGIN, masked=True):
+    """One hold as a crop for visual embeddings: the outline box grown by margin.
+
+    Masked crops keep only the hold (black background), so wall pixels do not leak
+    into the vector. Circle candidates (no outline) fall back to an ellipse mask."""
+    w, h = img.size
+    pts = cand.get("points") or []
+    if len(pts) >= 3:
+        xs = [p[0] * w for p in pts]
+        ys = [p[1] * h for p in pts]
+        x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+    else:
+        r = cand.get("r", 0.02) * w
+        x0, y0, x1, y1 = cand["x"] * w - r, cand["y"] * h - r, cand["x"] * w + r, cand["y"] * h + r
+    dx, dy = (x1 - x0) * margin, (y1 - y0) * margin
+    box = (max(0, int(x0 - dx)), max(0, int(y0 - dy)),
+           min(w, int(x1 + dx) + 1), min(h, int(y1 + dy) + 1))
+    if box[2] <= box[0] or box[3] <= box[1]:  # degenerate outline: a patch at the center
+        cx, cy = int(cand["x"] * w), int(cand["y"] * h)
+        box = (max(0, cx - 2), max(0, cy - 2), min(w, cx + 3), min(h, cy + 3))
+    crop = img.convert("RGB").crop(box)
+    if not masked:
+        return crop
+    mask = Image.new("L", crop.size, 0)
+    draw = ImageDraw.Draw(mask)
+    if len(pts) >= 3:
+        draw.polygon([(x * w - box[0], y * h - box[1]) for x, y in pts], fill=255)
+    else:
+        draw.ellipse([x0 - box[0], y0 - box[1], x1 - box[0], y1 - box[1]], fill=255)
+    return Image.composite(crop, Image.new("RGB", crop.size, (0, 0, 0)), mask)
+
+
+def _cosine(a, b):
+    """Cosine similarity of two vectors (0.0 when either is zero)."""
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    return dot / (na * nb) if na and nb else 0.0
+
+
+def dino_embed(crops):
+    """DINOv2 ViT-S/14 embeddings for hold crops, L2-normalized (one vector per crop).
+
+    torch is imported lazily and the model is cached, so the first call loads the
+    weights and later calls reuse them. Raises ImportError without torch."""
+    import torch  # lazy: torch stays an optional local-only dependency
+
+    global _DINO
+    if not crops:
+        return []
+    if _DINO is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = torch.hub.load("facebookresearch/dinov2", EMBED_MODEL).to(device).eval()
+        _DINO = (model, device)
+    model, device = _DINO
+    batch = []
+    for crop in crops:
+        px = crop.convert("RGB").resize((EMBED_SIZE, EMBED_SIZE))
+        t = torch.tensor(list(px.getdata()), dtype=torch.float32).reshape(EMBED_SIZE, EMBED_SIZE, 3)
+        t = t.permute(2, 0, 1) / 255.0
+        for ch in range(3):
+            t[ch] = (t[ch] - EMBED_MEAN[ch]) / EMBED_STD[ch]
+        batch.append(t)
+    out = []
+    with torch.no_grad():
+        stacked = torch.stack(batch).to(device)
+        for i in range(0, len(stacked), EMBED_BATCH):
+            out.append(model(stacked[i:i + EMBED_BATCH]).cpu())
+    embs = torch.cat(out)
+    return (embs / embs.norm(dim=1, keepdim=True)).tolist()
+
+
+def add_embed_similar(img, cands, embedder=None, top_k=EMBED_TOP_K):
+    """Set c["embed_top"] to [(id, cosine)...] of the top_k most similar other holds.
+
+    The default embedder is DINOv2 over masked hold crops; pass a fake embedder
+    (crops → vectors) in tests. Without torch the default raises ImportError and
+    every list stays empty, so the pipeline runs on color alone."""
+    for c in cands:
+        c["embed_top"] = []
+    if len(cands) < 2:
+        return cands
+    run = embedder or dino_embed
+    try:
+        embs = run([hold_crop(img, c) for c in cands])
+    except ImportError:
+        if embedder is not None:
+            raise
+        log.warning("route pipeline: torch is not installed, embedding hints are off")
+        return cands
+    if len(embs) != len(cands):
+        log.warning("route pipeline: embedder returned %d vectors for %d holds, hints are off",
+                    len(embs), len(cands))
+        return cands
+    for i, c in enumerate(cands):
+        ranked = sorted((_cosine(embs[i], embs[j]), cands[j]["id"])
+                        for j in range(len(cands)) if j != i)
+        top = ranked[-top_k:][::-1] if top_k > 0 else []
+        c["embed_top"] = [(oid, round(score, 3)) for score, oid in top]
+    return cands
+
+
 def fallback_ids(cands, tap_id):
     """Deterministic answer without AI: the tapped hold's CV color group (tap first)."""
     group = next(c["group"] for c in cands if c["id"] == tap_id)
@@ -175,22 +301,29 @@ def fallback_ids(cands, tap_id):
 
 
 def prompt_table(cands, tap_id):
-    """All holds as compact text: color features, groups and spatial neighbors."""
-    rows = ["id | color | hue sat val | L a b | group | x y size | near"]
+    """All holds as compact text: color features, groups, spatial neighbors and embed hints."""
+    show_embed = any(c.get("embed_top") for c in cands)
+    rows = ["id | color | hue sat val | L a b | group | x y size | near" + (" | embed" if show_embed else "")]
     for c in cands:
         h, s, v = c["hsv"]
         lab = " ".join(str(v) for v in c["lab"])
-        rows.append(f"{c['id']}{'*' if c['id'] == tap_id else ''} | {c['color_name']} | "
-                    f"{h} {s} {v} | {lab} | {c['group']} | "
-                    f"{round(c['x'] * 1000)} {round(c['y'] * 1000)} {round(c['r'] * 1000)} | "
-                    f"{','.join(map(str, c['near']))}")
+        row = (f"{c['id']}{'*' if c['id'] == tap_id else ''} | {c['color_name']} | "
+               f"{h} {s} {v} | {lab} | {c['group']} | "
+               f"{round(c['x'] * 1000)} {round(c['y'] * 1000)} {round(c['r'] * 1000)} | "
+               f"{','.join(map(str, c['near']))}")
+        if show_embed:
+            row += f" | {','.join(f'{i}:{s:.2f}' for i, s in c.get('embed_top') or [])}"
+        rows.append(row)
     groups = {}
     for c in cands:
         groups.setdefault(c["group"], []).append(c["id"])
     names = {c["group"]: c["color_name"] for c in cands}
     detail = "; ".join(f"{g} ({names[g]}): {ids}" for g, ids in sorted(groups.items()))
-    return ("\n".join(rows) + f"\nColor groups: {detail}\n"
-            f"The user tapped hold {tap_id} (marked {tap_id}*). Return ONLY the holds of the tapped "
+    table = "\n".join(rows) + f"\nColor groups: {detail}\n"
+    if show_embed:
+        table += ("Embed lists the visually most similar holds per row as id:score "
+                  "(higher is more similar); use it as a hint with color and position.\n")
+    return (table + f"The user tapped hold {tap_id} (marked {tap_id}*). Return ONLY the holds of the tapped "
             f"hold's route as JSON.")
 
 
@@ -257,8 +390,13 @@ def run_once(spark, img, cands, tap_id):
     return ids, {"text": text, "usage": usage, "fallback": "", "confidence": parsed["confidence"]}
 
 
-def find_with(sam, spark, jpeg, point, on_trace=None, clock=time.monotonic):
-    """(JPEG, point → holds) with injected SAM and Spark. Trace steps: (sam), (color), (spark), (post)."""
+def find_with(sam, spark, jpeg, point, on_trace=None, clock=time.monotonic,
+              embedder=None, use_embed=None):
+    """(JPEG, point → holds) with injected SAM and Spark. Trace steps: (sam), (color), (spark), (post).
+
+    use_embed adds DINOv2 similarity hints (an extra (embed) trace step); None reads
+    META3_EMBED from the environment (default off). embedder is injectable for tests
+    (crops → vectors); embedding failures never break the pipeline, they skip the hints."""
     started = clock()
     try:
         img, cands, tap_id = agent_mod.prepare(sam, jpeg, point)
@@ -284,6 +422,20 @@ def find_with(sam, spark, jpeg, point, on_trace=None, clock=time.monotonic):
     add_neighbors(cands, img.width, img.height)
     trace.append({"tool": "(color)", "args": {"groups": len({c["group"] for c in cands})},
                   "ms": round((clock() - started) * 1000)})
+    if use_embed if use_embed is not None else embed_enabled():
+        started = clock()
+        try:
+            add_embed_similar(img, cands, embedder=embedder)
+            if any(c.get("embed_top") for c in cands):
+                trace.append({"tool": "(embed)",
+                              "args": {"hints": sum(len(c.get("embed_top") or []) for c in cands)},
+                              "ms": round((clock() - started) * 1000)})
+        except ImportError:  # torch is optional: silently run without embedding hints
+            pass
+        except Exception as err:
+            log.warning("route pipeline: embeddings failed (%s: %s)", type(err).__name__, str(err)[:300])
+            for c in cands:
+                c["embed_top"] = []
     started = clock()
     ids, info = run_once(spark, img, cands, tap_id)
     step = {"tool": "(spark)", "args": {"count": len(ids), "spark_calls": 1},
@@ -304,18 +456,21 @@ def find_with(sam, spark, jpeg, point, on_trace=None, clock=time.monotonic):
     return holds
 
 
-def route_finder(env, on_trace=None):
+def route_finder(env, on_trace=None, embedder=None):
     """Find holds with the three-stage pipeline (SAM + CV colors + single-pass Spark).
 
     (JPEG, point → holds), or None without a key. Pass on_trace(trace) here, or to each
-    call as find(jpeg, point, on_trace=...), to receive the per-stage steps."""
+    call as find(jpeg, point, on_trace=...), to receive the per-stage steps.
+    META3_EMBED=1 in env adds DINOv2 similarity hints (torch stays optional);
+    embedder (crops → vectors) is injectable for tests."""
     post, chat = sam_mod.http_post(env), agent_mod.http_chat(env)
     if not (post and chat):
         return None
     sam = sam_mod.Sam(post)
     spark = single_call(chat, env.get("META_AGENT_MODEL", agent_mod.MODEL),
                         env.get("META_AGENT_EFFORT", agent_mod.EFFORT))
+    use_embed = embed_enabled(env)
 
     def find(jpeg, point, on_trace=on_trace):
-        return find_with(sam, spark, jpeg, point, on_trace)
+        return find_with(sam, spark, jpeg, point, on_trace, embedder=embedder, use_embed=use_embed)
     return find

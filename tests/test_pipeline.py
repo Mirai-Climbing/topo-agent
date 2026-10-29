@@ -2,6 +2,7 @@
 """The three-stage pipeline (topo_agent/pipeline.py), with a fake SAM and fake Spark (no network)."""
 import io
 import json
+import os
 import unittest
 from unittest import mock
 
@@ -196,3 +197,90 @@ class FinderTest(unittest.TestCase):
         self.assertIs(sent[0]["store"], False)
         self.assertNotIn("tools", sent[0])
         self.assertNotIn("reasoning_effort", sent[0])
+
+
+def fake_embedder(crops):
+    """Fixed vectors for the three test holds (no torch): the two reds match, blue differs."""
+    assert len(crops) == 3
+    return [[1.0, 0.0], [0.9, 0.1], [0.0, 1.0]]
+
+
+class EmbedTest(unittest.TestCase):
+    def test_embed_top_from_fake_vectors(self):
+        cands = pipeline.add_embed_similar(wall(), candidates(), embedder=fake_embedder, top_k=2)
+        self.assertEqual([i for i, _ in cands[0]["embed_top"]], [1, 2])  # the other red first
+        self.assertGreater(cands[0]["embed_top"][0][1], 0.99)
+        self.assertEqual(cands[2]["embed_top"][0][0], 1)
+        self.assertEqual(len(cands[1]["embed_top"]), 2)
+
+    def test_prompt_table_shows_embed_only_when_present(self):
+        cands = pipeline.add_neighbors(pipeline.group_by_color(candidates()), W, H)
+        self.assertNotIn("embed", pipeline.prompt_table(cands, 0))  # default off: no column
+        pipeline.add_embed_similar(wall(), cands, embedder=fake_embedder, top_k=1)
+        table = pipeline.prompt_table(cands, 0)
+        self.assertIn("| embed", table)
+        self.assertIn("1:0.99", table)  # hold 0* lists hold 1 at cosine 0.99
+
+    def test_hold_crop_masked_and_circle(self):
+        img = wall()
+        outlined = candidates()[0]
+        masked = pipeline.hold_crop(img, outlined)
+        plain = pipeline.hold_crop(img, outlined, masked=False)
+        self.assertEqual(masked.size, plain.size)
+        self.assertGreater(masked.width, 4)
+        self.assertGreater(masked.height, 4)
+        circle = pipeline.hold_crop(img, dict(outlined, points=[]))  # no outline: ellipse fallback
+        self.assertGreater(circle.width, 4)
+        self.assertGreater(circle.height, 4)
+
+    def test_embed_enabled_defaults_off(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(pipeline.embed_enabled())
+            self.assertFalse(pipeline.embed_enabled({}))
+            self.assertTrue(pipeline.embed_enabled({"META3_EMBED": "1"}))
+        with mock.patch.dict(os.environ, {"META3_EMBED": "1"}):
+            self.assertTrue(pipeline.embed_enabled())
+            self.assertFalse(pipeline.embed_enabled({"META3_EMBED": "0"}))  # explicit env wins
+
+    def find(self, **kwargs):
+        jpeg = jpeg_of(wall())
+        tap = {"x": 230 / W, "y": 225 / H}
+
+        def post(body):
+            return {"output_text": "<0f>" + ",".join(record(i, box) for i, (box, _) in enumerate(HOLDS))}
+
+        spark = RunOnceTest().route_reply()
+        traces = []
+        with mock.patch.dict(os.environ, {}, clear=True):
+            holds = pipeline.find_with(sam.Sam(post), spark, jpeg, tap,
+                                       on_trace=traces.append, **kwargs)
+        return holds, traces[0], spark
+
+    def test_find_with_embed_adds_trace_and_table_signal(self):
+        holds, trace, spark = self.find(use_embed=True, embedder=fake_embedder)
+        self.assertEqual(len(holds), 2)
+        self.assertEqual([s["tool"] for s in trace], ["(sam)", "(color)", "(embed)", "(spark)", "(post)"])
+        self.assertIn("| embed", spark.seen[0][1]["content"][0]["text"])
+
+    def test_find_with_embed_off_by_default(self):
+        holds, trace, spark = self.find()
+        self.assertEqual(len(holds), 2)
+        self.assertEqual([s["tool"] for s in trace], ["(sam)", "(color)", "(spark)", "(post)"])
+        self.assertNotIn("embed", spark.seen[0][1]["content"][0]["text"])
+
+    def test_find_with_embed_failure_is_silent(self):
+        for boom in (ImportError("no torch"), RuntimeError("cuda busy")):
+            def broken(crops, err=boom):
+                raise err
+
+            holds, trace, spark = self.find(use_embed=True, embedder=broken)
+            self.assertEqual(len(holds), 2)  # the Spark answer is still used
+            self.assertEqual([s["tool"] for s in trace], ["(sam)", "(color)", "(spark)", "(post)"])
+            self.assertNotIn("embed", spark.seen[0][1]["content"][0]["text"])
+
+    def test_add_embed_similar_reraises_import_error_of_explicit_embedder(self):
+        def broken(crops):
+            raise ImportError("no torch")
+
+        with self.assertRaises(ImportError):
+            pipeline.add_embed_similar(wall(), candidates(), embedder=broken)
