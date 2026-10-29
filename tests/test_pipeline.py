@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The three-stage pipeline (topo_agent/pipeline.py), with a fake SAM and fake Spark (no network)."""
+import base64
 import io
 import json
+import os
 import unittest
 from unittest import mock
 
 from PIL import Image, ImageDraw
 
-from tests.test_sam import record
+from tests.test_sam import fake_api, record
 from topo_agent import agent, pipeline, sam
 
 W, H = 800, 600
@@ -196,3 +198,180 @@ class FinderTest(unittest.TestCase):
         self.assertIs(sent[0]["store"], False)
         self.assertNotIn("tools", sent[0])
         self.assertNotIn("reasoning_effort", sent[0])
+
+
+FLAGS = ["TOPO_SKIP_COVERED_POINT", "TOPO_PRUNE_PROMPT", "TOPO_PROMPT_MAX",
+         "TOPO_AI_SIDE", "TOPO_JPEG_QUALITY", "TOPO_SAM_SIDE", "TOPO_SAM_QUALITY"]
+
+
+def clean_env(**over):
+    """The speedup flags cleared (defaults), plus overrides. Tests never inherit the shell env."""
+    env = {k: v for k, v in os.environ.items() if k not in FLAGS}
+    env.update(over)
+    return mock.patch.dict(os.environ, env, clear=True)
+
+
+def many_cands(n=60, group_size=8):
+    """Synthetic holds: the tap's red group first, then four blue groups spread over the wall."""
+    cands = []
+    for i in range(n):
+        red = i < group_size
+        cands.append({"id": i, "x": 0.05 + 0.9 * (i % 10) / 10, "y": 0.05 + 0.9 * (i // 10) / 6,
+                      "r": 0.03, "points": [], "conf": 0.9, "area": 0.001,
+                      "hsv": (0.0, 0.8, 0.6) if red else (0.6, 0.8, 0.6),
+                      "lab": (50.0, 40.0, 10.0), "color_name": "red" if red else "blue",
+                      "group": 0 if red else 1 + (i - group_size) % 4, "near": []})
+    return pipeline.add_neighbors(cands, W, H)
+
+
+def image_bytes(part):
+    return base64.b64decode(part["image_url"]["url"].split(",", 1)[1])
+
+
+class SpeedupTest(unittest.TestCase):
+    def covered_post(self):
+        tap = {"x": 230 / W, "y": 225 / H}  # inside the first hold: the concepts cover it
+        text = "<0f>" + ",".join(record(i, box) for i, (box, _) in enumerate(HOLDS))
+        return tap, fake_api({"climbing hold": text, "climbing volume": text})
+
+    def test_default_prepare_sends_three_calls(self):
+        tap, (post, seen) = self.covered_post()
+        with clean_env():
+            _, cands, tap_id = agent.prepare(sam.Sam(post), jpeg_of(wall()), tap)
+        self.assertEqual(len(seen), 3)  # two concepts and one point, as before
+        self.assertEqual(tap_id, 0)
+
+    def test_skip_point_when_tap_is_covered(self):
+        tap, (post, seen) = self.covered_post()
+        with clean_env():
+            _, plain_cands, plain_tap = agent.prepare(sam.Sam(post), jpeg_of(wall()), tap)
+        tap, (post, seen) = self.covered_post()
+        with clean_env(TOPO_SKIP_COVERED_POINT="1"):
+            stats = {}
+            _, cands, tap_id = agent.prepare(sam.Sam(post), jpeg_of(wall()), tap, stats)
+        self.assertEqual(len(seen), 2)  # the point prompt is skipped
+        self.assertEqual(stats, {"sam_calls": 2})
+        self.assertEqual(tap_id, plain_tap)
+        self.assertEqual([(c["x"], c["y"]) for c in cands],
+                         [(c["x"], c["y"]) for c in plain_cands])  # same holds either way
+
+    def test_point_is_still_sent_when_tap_is_missed(self):
+        tap = {"x": 415 / W, "y": 212 / H}  # the blue hold, missed by the concept prompts
+        text = "<0f>" + record(0, HOLDS[0][0]) + "," + record(1, HOLDS[1][0])
+        blue = "<0f>" + record(1, HOLDS[2][0])
+        post, seen = fake_api({"climbing hold": text, "climbing volume": text,
+                               sam.point_prompt(tap["x"], tap["y"], W, H): blue})
+        with clean_env(TOPO_SKIP_COVERED_POINT="1"):
+            stats = {}
+            _, cands, tap_id = agent.prepare(sam.Sam(post), jpeg_of(wall()), tap, stats)
+        self.assertEqual(len(seen), 3)  # uncovered: the point prompt still goes out
+        self.assertEqual(stats, {"sam_calls": 3})
+        self.assertEqual(tap_id, 2)
+        self.assertEqual(agent.color_name(cands[2]["hsv"]), "blue")
+
+    def test_find_with_reports_actual_sam_calls(self):
+        jpeg = jpeg_of(wall())
+        tap = {"x": 230 / W, "y": 225 / H}
+
+        def run(**env):
+            text = "<0f>" + ",".join(record(i, box) for i, (box, _) in enumerate(HOLDS))
+            post, _ = fake_api({"climbing hold": text, "climbing volume": text})
+            spark = RunOnceTest().route_reply()
+            traces = []
+            with clean_env(**env):
+                holds = pipeline.find_with(sam.Sam(post), spark, jpeg, tap, on_trace=traces.append)
+            return holds, traces[0][0]["args"]["sam_calls"]
+
+        holds, default_calls = run()
+        self.assertEqual(default_calls, 3)
+        self.assertEqual(len(holds), 2)
+        holds, skipped_calls = run(TOPO_SKIP_COVERED_POINT="1")
+        self.assertEqual(skipped_calls, 2)
+        self.assertEqual(len(holds), 2)  # same answer with one fewer SAM call
+
+    def test_prompt_is_full_by_default(self):
+        cands = many_cands()
+        with clean_env():
+            self.assertIsNone(pipeline.prompt_cap())
+            text = pipeline.prompt_table(cands, 0)
+        self.assertNotIn("Showing", text)
+        rows = [line for line in text.splitlines()[1:] if " | " in line]
+        self.assertEqual(len(rows), len(cands))  # one full row per hold
+
+    def test_pruned_prompt_keeps_tap_group_and_counts(self):
+        cands = many_cands()
+        with clean_env(TOPO_PRUNE_PROMPT="1", TOPO_PROMPT_MAX="12"):
+            cap = pipeline.prompt_cap()
+            text = pipeline.prompt_table(cands, 0, cap)
+        self.assertEqual(cap, 12)
+        rows = [line for line in text.splitlines()[1:] if " | " in line]
+        self.assertLess(len(rows), len(cands))
+        self.assertIn("0*", text)  # the tap keeps its mark
+        for i in range(8):  # the tap's whole color group keeps full rows
+            self.assertTrue(any(line.startswith(f"{i} ") or line.startswith(f"{i}*")
+                                for line in rows), f"group row {i} is shown")
+        self.assertIn(f"Showing {len(rows)} of {len(cands)} holds", text)
+        for c in cands:  # every id is still named in the group listing, so all are answerable
+            self.assertIn(str(c["id"]), text.split("Color groups:")[1])
+        self.assertEqual(pipeline.parse_answer(
+            json.dumps({"hold_ids": [0, 59], "confidence": 0.8}),
+            {c["id"] for c in cands})["error"], "")  # a pruned id still parses
+
+    def test_prune_fills_with_nearest_first(self):
+        cands = many_cands()
+        kept = pipeline.select_prompt_cands(cands, 0, 10)
+        kept_ids = {c["id"] for c in kept}
+        self.assertTrue({c["id"] for c in cands if c["group"] == 0} <= kept_ids)
+        rest = [c for c in cands if c["id"] not in kept_ids]
+        tap = cands[0]
+        farthest_kept = max((c["x"] - tap["x"]) ** 2 + (c["y"] - tap["y"]) ** 2
+                            for c in kept if c["group"] != 0)
+        nearest_dropped = min((c["x"] - tap["x"]) ** 2 + (c["y"] - tap["y"]) ** 2 for c in rest)
+        self.assertLessEqual(farthest_kept, nearest_dropped)
+        self.assertEqual([c["id"] for c in kept], sorted(kept_ids))  # id order is kept
+
+    def test_pruned_prompt_reaches_spark(self):
+        cands = many_cands(n=60)
+        spark = RunOnceTest().route_reply(ids=[0])
+        with clean_env(TOPO_PRUNE_PROMPT="1", TOPO_PROMPT_MAX="12"):
+            ids, info = pipeline.run_once(spark, wall(), cands, 0)
+        self.assertEqual(ids, [0])
+        self.assertEqual(info["fallback"], "")
+        self.assertIn("Showing", spark.seen[0][1]["content"][0]["text"])
+
+    def test_spark_payload_defaults_are_unchanged(self):
+        cands = pipeline.add_neighbors(pipeline.group_by_color(candidates()), W, H)
+        with clean_env():
+            self.assertEqual(agent.ai_side(), agent.AI_SIDE)
+            self.assertEqual(agent.jpeg_quality(), 85)
+            spark = RunOnceTest().route_reply()
+            pipeline.run_once(spark, wall(), cands, 0)
+            default_parts = spark.seen[0][1]["content"][1:]
+        with Image.open(io.BytesIO(image_bytes(default_parts[0]))) as img:
+            self.assertEqual(img.size, (W, H))  # 800x600 wall is shown as is
+        with clean_env(TOPO_AI_SIDE="640", TOPO_JPEG_QUALITY="60"):
+            spark = RunOnceTest().route_reply()
+            pipeline.run_once(spark, wall(), cands, 0)
+            small_parts = spark.seen[0][1]["content"][1:]
+        with Image.open(io.BytesIO(image_bytes(small_parts[0]))) as img:
+            self.assertEqual(img.size, (640, 480))
+        default_len = sum(len(image_bytes(p)) for p in default_parts)
+        small_len = sum(len(image_bytes(p)) for p in small_parts)
+        self.assertLess(small_len, default_len)
+        self.assertLess(small_len, default_len * 0.7)  # a real payload cut, not a rounding error
+
+    def test_sam_shrink_knobs(self):
+        big = Image.new("RGB", (2000, 1500), (90, 200, 200))
+        out = io.BytesIO()
+        big.save(out, "JPEG", quality=95)
+        jpeg = out.getvalue()
+        with clean_env():
+            small, w, h = sam.shrink(jpeg)
+            self.assertEqual(max(w, h), sam.SEND_SIDE)  # 1600, as before
+            explicit, _, _ = sam.shrink(jpeg, 800)
+        with clean_env(TOPO_SAM_SIDE="800", TOPO_SAM_QUALITY="70"):
+            tiny, w, h = sam.shrink(jpeg)
+            self.assertEqual(max(w, h), 800)
+        self.assertLess(len(tiny), len(small))
+        with Image.open(io.BytesIO(explicit)) as img:
+            self.assertEqual(max(img.size), 800)  # an explicit side still wins
