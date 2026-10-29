@@ -32,6 +32,13 @@ plus the most questionable others) plus the tap close-up, asking only to drop ho
 that are bare wall, chalk dust, or clearly another color. The second answer must be
 a subset of the first; any failure keeps the first answer. Default off: with the
 flag unset the pipeline makes exactly one Spark call with byte-identical prompts.
+
+Optionally (META3_SHORTLIST=1), candidates are shortlisted before Spark: every hold
+is ranked by its max(DINOv2 cosine, color closeness) to the tap, then the top seeds
+pull in their spatial near-chains up to META3_SHORTLIST_MAX rows (default 24, the tap
+always kept). Spark sees only the shortlist rows and outlines; parsing uses the
+shortlist ids while the fallback stays the tapped hold's full color group. Without
+torch the ranker degrades to color plus spatial chains, so it works offline.
 """
 import io
 import json
@@ -59,6 +66,9 @@ EMBED_MARGIN = 0.15  # crop grows past the outline by this fraction of its box
 EMBED_MEAN = (0.485, 0.456, 0.406)  # DINOv2 input normalization
 EMBED_STD = (0.229, 0.224, 0.225)
 EMBED_BATCH = 32  # crops per forward pass
+SHORTLIST_ENV = "META3_SHORTLIST"  # set to "1" to shortlist candidates before Spark (default off)
+SHORTLIST_MAX_ENV = "META3_SHORTLIST_MAX"  # shortlist cap (default SHORTLIST_MAX)
+SHORTLIST_MAX = 24  # dense walls show 100+ holds; Spark sees only the most relevant rows
 
 VERIFY_ENV = "META3_VERIFY"  # set to "1" for the drop-only second Spark call (default off)
 VERIFY_MAX_TILES = 12  # answered holds shown in the verify sheet at most (tap + most questionable)
@@ -428,6 +438,90 @@ def add_embed_similar(img, cands, embedder=None, top_k=EMBED_TOP_K):
     return cands
 
 
+def shortlist_enabled(env=None):
+    """True when META3_SHORTLIST=1 (default off). An explicit env dict entry wins over os.environ."""
+    if env is not None and SHORTLIST_ENV in env:
+        return str(env[SHORTLIST_ENV]) == "1"
+    return os.environ.get(SHORTLIST_ENV) == "1"
+
+
+def shortlist_max(env=None):
+    """Shortlist cap (META3_SHORTLIST_MAX, default 24). Unset or invalid values fall back to 24."""
+    if env is not None and SHORTLIST_MAX_ENV in env:
+        raw = env[SHORTLIST_MAX_ENV]
+    else:
+        raw = os.environ.get(SHORTLIST_MAX_ENV)
+    if raw is None:
+        return SHORTLIST_MAX
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return SHORTLIST_MAX
+
+
+def color_closeness(a, b):
+    """Color similarity of two HSV triples (1.0 = same): 0.5 at the SIMILAR boundary, fading toward 0."""
+    return 1.0 / (1.0 + agent_mod.color_distance(a, b) / agent_mod.SIMILAR)
+
+
+def tap_similarities(img, cands, tap_id, embedder=None):
+    """id → max(DINOv2 cosine to the tap, color closeness to the tap), for shortlist ranking.
+
+    The default embedder is DINOv2 over masked hold crops; pass a fake embedder
+    (crops → vectors) in tests. Embedding failures (no torch, bad vectors) never
+    break the ranker: it degrades to color closeness alone, so it works offline."""
+    tap = next(c for c in cands if c["id"] == tap_id)
+    sims = {c["id"]: color_closeness(c["hsv"], tap["hsv"]) for c in cands}
+    run = embedder or dino_embed
+    try:
+        embs = run([hold_crop(img, c) for c in cands])
+    except ImportError:
+        log.warning("route pipeline: shortlist ranks by color only (no embeddings)")
+        return sims
+    except Exception as err:
+        log.warning("route pipeline: shortlist embeddings failed (%s: %s), ranks by color only",
+                    type(err).__name__, str(err)[:200])
+        return sims
+    if len(embs) != len(cands):
+        log.warning("route pipeline: embedder returned %d vectors for %d holds, "
+                    "shortlist ranks by color only", len(embs), len(cands))
+        return sims
+    pos = next(i for i, c in enumerate(cands) if c["id"] == tap_id)
+    for i, c in enumerate(cands):
+        sims[c["id"]] = max(sims[c["id"]], _cosine(embs[pos], embs[i]))
+    return sims
+
+
+def shortlist_candidates(cands, tap_id, sims, cap=SHORTLIST_MAX):
+    """Greedy shortlist: the tap is always kept, then rank order with near-chain expansion.
+
+    Seeds are visited most-similar-first (the tap first whatever its score); each seed
+    pulls in its spatial near-chain (LINK jumps through c["near"], most similar first)
+    before the next seed, until cap rows. Ids missing from sims score 0. cap <= 0 (or
+    None, or fewer candidates than the cap) keeps everything. Id order is kept."""
+    if cap is None or cap <= 0 or len(cands) <= cap:
+        return list(cands)
+    by_id = {c["id"]: c for c in cands}
+    seeds = sorted(cands, key=lambda c: (c["id"] != tap_id, -sims.get(c["id"], 0.0), c["id"]))
+    keep, seen = [], set()
+    for seed in seeds:
+        if len(keep) >= cap:
+            break
+        if seed["id"] in seen:
+            continue
+        queue = [seed["id"]]
+        while queue and len(keep) < cap:
+            cur = queue.pop(0)
+            if cur in seen:
+                continue
+            seen.add(cur)
+            keep.append(by_id[cur])
+            nbrs = sorted((n for n in (by_id[cur].get("near") or []) if n in by_id and n not in seen),
+                          key=lambda i: -sims.get(i, 0.0))
+            queue.extend(nbrs)
+    return sorted(keep, key=lambda c: c["id"])
+
+
 def fallback_ids(cands, tap_id):
     """Deterministic answer without AI: the tapped hold's CV color group (tap first)."""
     group = next(c["group"] for c in cands if c["id"] == tap_id)
@@ -533,14 +627,17 @@ def parse_answer(text, known):
     return {"ids": clean, "confidence": conf, "error": ""}
 
 
-def run_once(spark, img, cands, tap_id, prompt=""):
+def run_once(spark, img, cands, tap_id, prompt="", fallback_cands=None):
     """One Spark call for the tapped route. Returns (hold ids, info).
 
     prompt selects the system prompt variant (v1, v2 or v3; default v1 keeps current
     behavior). info holds the raw reply, token usage, the resolved variant name and the
     fallback reason ("" when Spark answered). Never retries: on failure or invalid JSON
-    the answer is the CV color group of the tap."""
+    the answer is the CV color group of the tap. fallback_cands overrides which set the
+    fallback group is drawn from while parsing stays on cands (shortlist mode parses
+    against the shortlist but falls back to the full group); None keeps cands."""
     variant, system = system_prompt(prompt)
+    full = fallback_cands if fallback_cands is not None else cands
     small = img.convert("RGB").copy()
     small.thumbnail((agent_mod.ai_side(), agent_mod.ai_side()))
     close_up, _ = agent_mod.Tools(img, cands, tap_id).look_closer([tap_id])
@@ -553,13 +650,13 @@ def run_once(spark, img, cands, tap_id, prompt=""):
     try:
         reply = spark(messages)
     except Exception as err:
-        return fallback_ids(cands, tap_id), {"text": "", "usage": {}, "prompt": variant,
-                                             "fallback": f"{type(err).__name__}: {str(err)[:200]}"}
+        return fallback_ids(full, tap_id), {"text": "", "usage": {}, "prompt": variant,
+                                            "fallback": f"{type(err).__name__}: {str(err)[:200]}"}
     text, usage = reply.get("text") or "", reply.get("usage") or {}
     parsed = parse_answer(text, {c["id"] for c in cands})
     if parsed["error"]:
-        return fallback_ids(cands, tap_id), {"text": text, "usage": usage, "prompt": variant,
-                                             "fallback": parsed["error"]}
+        return fallback_ids(full, tap_id), {"text": text, "usage": usage, "prompt": variant,
+                                            "fallback": parsed["error"]}
     ids = agent_mod.clean_ids(parsed["ids"], {c["id"] for c in cands}, tap_id)
     return ids, {"text": text, "usage": usage, "prompt": variant, "fallback": "",
                  "confidence": parsed["confidence"]}
@@ -667,9 +764,10 @@ def verify_once(spark, img, cands, tap_id, ids):
 
 
 def find_with(sam, spark, jpeg, point, on_trace=None, clock=time.monotonic,
-              prompt="", embedder=None, use_embed=None, use_verify=None):
+              prompt="", embedder=None, use_embed=None, use_verify=None,
+              use_shortlist=None, shortlist_cap=None):
     """(JPEG, point → holds) with injected SAM and Spark. Trace steps: (sam), (color), (spark), (post),
-    plus (embed) and (verify) when those passes are enabled.
+    plus (embed), (shortlist) and (verify) when those passes are enabled.
 
     prompt selects the single-pass system prompt variant (v1, v2 or v3; default v1).
     use_embed adds DINOv2 similarity hints (an extra (embed) trace step); None reads
@@ -677,7 +775,11 @@ def find_with(sam, spark, jpeg, point, on_trace=None, clock=time.monotonic,
     (crops → vectors); embedding failures never break the pipeline, they skip the hints.
     use_verify adds a drop-only second Spark call over close-up tiles of the answer
     (an extra (verify) trace step with its own tokens); None reads META3_VERIFY from
-    the environment (default off, exactly one Spark call with unchanged prompts)."""
+    the environment (default off, exactly one Spark call with unchanged prompts).
+    use_shortlist ranks every hold by tap similarity and sends only the top rows to
+    Spark (an extra (shortlist) trace step); None reads META3_SHORTLIST (default off).
+    shortlist_cap overrides META3_SHORTLIST_MAX (default 24). The ranker reuses the
+    embedder and degrades to color plus spatial chains without embeddings."""
     started = clock()
     stats = {}
     try:
@@ -704,22 +806,31 @@ def find_with(sam, spark, jpeg, point, on_trace=None, clock=time.monotonic,
     add_neighbors(cands, img.width, img.height)
     trace.append({"tool": "(color)", "args": {"groups": len({c["group"] for c in cands})},
                   "ms": round((clock() - started) * 1000)})
+    spark_cands = cands
+    if use_shortlist if use_shortlist is not None else shortlist_enabled():
+        started = clock()
+        cap = shortlist_cap if shortlist_cap is not None else shortlist_max()
+        sims = tap_similarities(img, cands, tap_id, embedder=embedder)
+        spark_cands = shortlist_candidates(cands, tap_id, sims, cap)
+        trace.append({"tool": "(shortlist)",
+                      "args": {"kept": len(spark_cands), "of": len(cands), "cap": cap},
+                      "ms": round((clock() - started) * 1000)})
     if use_embed if use_embed is not None else embed_enabled():
         started = clock()
         try:
-            add_embed_similar(img, cands, embedder=embedder)
-            if any(c.get("embed_top") for c in cands):
+            add_embed_similar(img, spark_cands, embedder=embedder)
+            if any(c.get("embed_top") for c in spark_cands):
                 trace.append({"tool": "(embed)",
-                              "args": {"hints": sum(len(c.get("embed_top") or []) for c in cands)},
+                              "args": {"hints": sum(len(c.get("embed_top") or []) for c in spark_cands)},
                               "ms": round((clock() - started) * 1000)})
         except ImportError:  # torch is optional: silently run without embedding hints
             pass
         except Exception as err:
             log.warning("route pipeline: embeddings failed (%s: %s)", type(err).__name__, str(err)[:300])
-            for c in cands:
+            for c in spark_cands:
                 c["embed_top"] = []
     started = clock()
-    ids, info = run_once(spark, img, cands, tap_id, prompt=prompt)
+    ids, info = run_once(spark, img, spark_cands, tap_id, prompt=prompt, fallback_cands=cands)
     step = {"tool": "(spark)", "args": {"count": len(ids), "spark_calls": 1, "prompt": info["prompt"]},
             "ms": round((clock() - started) * 1000)}
     if info.get("fallback"):
@@ -760,6 +871,8 @@ def route_finder(env, on_trace=None, embedder=None):
     META3_PROMPT in env selects the single-pass system prompt variant (v1, v2 or v3).
     META3_EMBED=1 in env adds DINOv2 similarity hints (torch stays optional);
     META3_VERIFY=1 in env adds the drop-only second Spark call over close-up tiles.
+    META3_SHORTLIST=1 in env shortlists candidates before Spark (cap META3_SHORTLIST_MAX,
+    default 24; the ranker degrades to color plus spatial chains without torch).
     embedder (crops → vectors) is injectable for tests."""
     post, chat = sam_mod.http_post(env), agent_mod.http_chat(env)
     if not (post and chat):
@@ -770,8 +883,11 @@ def route_finder(env, on_trace=None, embedder=None):
     prompt = env.get("META3_PROMPT", "")
     use_embed = embed_enabled(env)
     use_verify = verify_enabled(env)
+    use_shortlist = shortlist_enabled(env)
+    cap = shortlist_max(env)
 
     def find(jpeg, point, on_trace=on_trace):
         return find_with(sam, spark, jpeg, point, on_trace, prompt=prompt,
-                         embedder=embedder, use_embed=use_embed, use_verify=use_verify)
+                         embedder=embedder, use_embed=use_embed, use_verify=use_verify,
+                         use_shortlist=use_shortlist, shortlist_cap=cap)
     return find

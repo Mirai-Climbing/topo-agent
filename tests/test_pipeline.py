@@ -395,7 +395,8 @@ class EmbedTest(unittest.TestCase):
 
 
 FLAGS = ["TOPO_SKIP_COVERED_POINT", "TOPO_PRUNE_PROMPT", "TOPO_PROMPT_MAX",
-         "TOPO_AI_SIDE", "TOPO_JPEG_QUALITY", "TOPO_SAM_SIDE", "TOPO_SAM_QUALITY"]
+         "TOPO_AI_SIDE", "TOPO_JPEG_QUALITY", "TOPO_SAM_SIDE", "TOPO_SAM_QUALITY",
+         "META3_SHORTLIST", "META3_SHORTLIST_MAX"]
 
 
 def clean_env(**over):
@@ -741,3 +742,195 @@ class VerifyTest(unittest.TestCase):
             holds = pipeline.route_finder({}, on_trace=traces.append)(jpeg, tap)
             self.assertEqual(len(holds), 3)  # default keeps the over-pick
             self.assertEqual(len(sent), 1)
+
+
+def route_cands():
+    """A dense-wall toy: the tap (red), two shadowed route holds (blue group but
+    tap-like vectors) and 27 far distractors (blue group, tap-unlike vectors)."""
+    specs = [(0, 0.20, 0.70, (0.0, 0.8, 0.6), [1.0, 0.0]),
+             (1, 0.25, 0.55, (0.6, 0.8, 0.6), [0.99, 0.10]),
+             (2, 0.30, 0.40, (0.6, 0.8, 0.6), [0.98, 0.20])]
+    for i in range(3, 30):
+        specs.append((i, 0.05 + 0.9 * ((i * 7) % 10) / 10, 0.05 + 0.9 * ((i * 13) % 8) / 8,
+                      (0.6, 0.8, 0.6), [0.0, 1.0]))
+    cands = [{"id": i, "x": x, "y": y, "r": 0.03, "points": [], "hsv": hsv}
+             for i, x, y, hsv, _ in specs]
+    vecs = [v for _, _, _, _, v in specs]
+    return pipeline.add_neighbors(pipeline.group_by_color(cands), W, H), vecs
+
+
+class ShortlistTest(unittest.TestCase):
+    def embedder_for(self, vecs):
+        def run(crops):
+            assert len(crops) == len(vecs)
+            return vecs
+        return run
+
+    def test_shortlist_env_defaults_off(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(pipeline.shortlist_enabled())
+            self.assertFalse(pipeline.shortlist_enabled({}))
+            self.assertEqual(pipeline.shortlist_max(), 24)
+            self.assertTrue(pipeline.shortlist_enabled({"META3_SHORTLIST": "1"}))
+            self.assertEqual(pipeline.shortlist_max({"META3_SHORTLIST_MAX": "8"}), 8)
+        with mock.patch.dict(os.environ, {"META3_SHORTLIST": "1", "META3_SHORTLIST_MAX": "8"}):
+            self.assertTrue(pipeline.shortlist_enabled())
+            self.assertEqual(pipeline.shortlist_max(), 8)
+            self.assertFalse(pipeline.shortlist_enabled({"META3_SHORTLIST": "0"}))  # explicit wins
+            self.assertEqual(pipeline.shortlist_max({"META3_SHORTLIST_MAX": "5"}), 5)
+
+    def test_shortlist_max_falls_back_on_invalid(self):
+        for raw in ("", "abc", "1.5", None):
+            with self.subTest(raw=raw):
+                self.assertEqual(pipeline.shortlist_max({"META3_SHORTLIST_MAX": raw}), 24)
+
+    def test_color_closeness_scale(self):
+        red = (0.0, 0.8, 0.6)
+        self.assertEqual(pipeline.color_closeness(red, red), 1.0)
+        edge = (0.06, 0.8, 0.6)  # hue gap 0.06: exactly the SIMILAR boundary
+        self.assertAlmostEqual(agent.color_distance(red, edge), agent.SIMILAR)
+        self.assertAlmostEqual(pipeline.color_closeness(red, edge), 0.5)
+        self.assertLess(pipeline.color_closeness(red, (0.6, 0.8, 0.6)), 0.2)  # blue is far
+
+    def test_ranking_takes_max_of_embed_and_color(self):
+        cands, vecs = route_cands()
+        sims = pipeline.tap_similarities(wall(), cands, 0, embedder=self.embedder_for(vecs))
+        self.assertEqual(sims[0], 1.0)  # the tap matches itself
+        self.assertGreater(sims[1], 0.9)  # shadowed route holds rank by embedding...
+        self.assertGreater(sims[2], 0.9)
+        self.assertLess(sims[3], 0.2)  # ...above same-group distractors
+
+    def test_shortlist_keeps_tap_and_similar_within_cap(self):
+        cands, vecs = route_cands()
+        sims = pipeline.tap_similarities(wall(), cands, 0, embedder=self.embedder_for(vecs))
+        kept = pipeline.shortlist_candidates(cands, 0, sims, cap=8)
+        kept_ids = [c["id"] for c in kept]
+        self.assertEqual(len(kept_ids), 8)
+        self.assertEqual(kept_ids, sorted(kept_ids))  # id order is kept
+        self.assertIn(0, kept_ids)  # the tap is always kept
+        self.assertIn(1, kept_ids)  # the shadowed route holds survive the cut
+        self.assertIn(2, kept_ids)
+
+    def test_shortlist_caps_size(self):
+        cands = many_cands(n=60)
+        sims = {c["id"]: 1.0 - c["id"] / 100 for c in cands}  # id order
+        kept = pipeline.shortlist_candidates(cands, 0, sims, cap=24)
+        kept_ids = [c["id"] for c in kept]
+        self.assertEqual(len(kept_ids), 24)
+        self.assertIn(0, kept_ids)
+        self.assertTrue({c["id"] for c in cands if c["group"] == 0} <= set(kept_ids))
+
+    def test_shortlist_is_noop_when_everything_fits(self):
+        cands, _ = route_cands()
+        for cap in (None, 0, -1, 30, 100):
+            with self.subTest(cap=cap):
+                kept = pipeline.shortlist_candidates(cands, 0, {}, cap=cap)
+                self.assertEqual([c["id"] for c in kept], list(range(30)))
+
+    def test_tap_is_kept_whatever_its_score(self):
+        cands = [{"id": 0, "near": [1]}, {"id": 1, "near": [0, 2]}, {"id": 2, "near": [1]},
+                 {"id": 3, "near": []}, {"id": 4, "near": []}]
+        kept = pipeline.shortlist_candidates(cands, 3, {0: 0.9, 1: 0.9, 2: 0.9, 3: 0.0, 4: 0.9},
+                                             cap=2)
+        self.assertEqual([c["id"] for c in kept], [0, 3])
+
+    def test_near_chain_beats_rank(self):
+        cands = [{"id": 0, "near": [1]}, {"id": 1, "near": [0, 2]}, {"id": 2, "near": [1]},
+                 {"id": 3, "near": []}, {"id": 4, "near": []}]
+        sims = {0: 1.0, 1: 0.5, 2: 0.0, 3: 0.9, 4: 0.8}
+        kept = pipeline.shortlist_candidates(cands, 0, sims, cap=3)
+        self.assertEqual([c["id"] for c in kept], [0, 1, 2])  # hold 2 rides the chain
+
+    def test_ranker_degrades_without_embed(self):
+        cands = pipeline.add_neighbors(pipeline.group_by_color(candidates()), W, H)
+
+        def no_torch(crops):
+            raise ImportError("no torch")
+
+        sims = pipeline.tap_similarities(wall(), cands, 0, embedder=no_torch)
+        for c in cands:  # pure color closeness, offline
+            self.assertAlmostEqual(sims[c["id"]],
+                                   pipeline.color_closeness(c["hsv"], cands[0]["hsv"]))
+        self.assertGreater(sims[1], sims[2])  # the same-color hold still outranks blue
+        kept = pipeline.shortlist_candidates(cands, 0, sims, cap=2)
+        self.assertEqual([c["id"] for c in kept], [0, 1])
+
+    def test_ranker_degrades_when_default_embedder_has_no_torch(self):
+        cands = pipeline.add_neighbors(pipeline.group_by_color(candidates()), W, H)
+        with mock.patch.object(pipeline, "dino_embed", side_effect=ImportError("no torch")):
+            sims = pipeline.tap_similarities(wall(), cands, 0)  # embedder=None: the default path
+        self.assertGreater(sims[1], sims[2])
+        self.assertEqual(sims[0], 1.0)
+
+    def find(self, spark, **kwargs):
+        jpeg = jpeg_of(wall())
+        tap = {"x": 230 / W, "y": 225 / H}
+
+        def post(body):
+            return {"output_text": "<0f>" + ",".join(record(i, box) for i, (box, _) in enumerate(HOLDS))}
+
+        traces = []
+        with clean_env():
+            holds = pipeline.find_with(sam.Sam(post), spark, jpeg, tap,
+                                       on_trace=traces.append, use_embed=False, **kwargs)
+        return holds, traces[0], spark
+
+    @staticmethod
+    def table_rows(spark):
+        lines = spark.seen[0][1]["content"][0]["text"].splitlines()[1:]  # skip the header row
+        return [line for line in lines if " | " in line]
+
+    def test_find_with_shortlist_off_by_default(self):
+        spark = RunOnceTest().route_reply()
+        holds, trace, _ = self.find(spark)
+        self.assertEqual(len(holds), 2)
+        self.assertEqual([s["tool"] for s in trace], ["(sam)", "(color)", "(spark)", "(post)"])
+        self.assertEqual(len(self.table_rows(spark)), 3)  # the full table
+
+    def test_find_with_shortlist_trims_spark_table(self):
+        spark = RunOnceTest().route_reply(ids=(0, 1))
+        holds, trace, _ = self.find(spark, use_shortlist=True, shortlist_cap=2,
+                                    embedder=fake_embedder)
+        self.assertEqual(len(holds), 2)
+        self.assertEqual([s["tool"] for s in trace],
+                         ["(sam)", "(color)", "(shortlist)", "(spark)", "(post)"])
+        self.assertEqual(trace[2]["args"], {"kept": 2, "of": 3, "cap": 2})
+        rows = self.table_rows(spark)
+        self.assertEqual(len(rows), 2)  # only the shortlist rows reach Spark
+        self.assertFalse(any(line.startswith("2 |") for line in rows))
+
+    def test_parse_uses_shortlist_ids_but_fallback_stays_full_group(self):
+        spark = RunOnceTest().route_reply(ids=(0, 2))  # id 2 was shortlisted away
+        holds, trace, _ = self.find(spark, use_shortlist=True, shortlist_cap=2,
+                                    embedder=fake_embedder)
+        self.assertIn("unknown id", trace[3]["args"]["fallback"])
+        self.assertEqual(len(holds), 2)  # the fallback is the full red group, not the shortlist
+
+    def test_route_finder_honors_shortlist_env(self):
+        jpeg = jpeg_of(wall())
+        tap = {"x": 230 / W, "y": 225 / H}
+
+        def sam_post(body):
+            return {"output_text": "<0f>" + ",".join(record(i, box) for i, (box, _) in enumerate(HOLDS))}
+
+        def chat(body):
+            return {"choices": [{"message": {"content": json.dumps({"hold_ids": [0, 1],
+                                                                                  "confidence": 0.9})}}],
+                    "usage": {}}
+
+        with clean_env(), \
+                mock.patch.object(sam, "http_post", lambda env: sam_post), \
+                mock.patch.object(agent, "http_chat", lambda env: chat):
+            traces = []
+            holds = pipeline.route_finder({"META3_SHORTLIST": "1", "META3_SHORTLIST_MAX": "2"},
+                                          on_trace=traces.append,
+                                          embedder=fake_embedder)(jpeg, tap)
+            self.assertEqual(len(holds), 2)
+            self.assertEqual([s["tool"] for s in traces[0]],
+                             ["(sam)", "(color)", "(shortlist)", "(spark)", "(post)"])
+            self.assertEqual(traces[0][2]["args"], {"kept": 2, "of": 3, "cap": 2})
+            traces = []
+            holds = pipeline.route_finder({}, on_trace=traces.append,
+                                          embedder=fake_embedder)(jpeg, tap)
+            self.assertEqual(len(holds), 2)
+            self.assertNotIn("(shortlist)", [s["tool"] for s in traces[0]])
