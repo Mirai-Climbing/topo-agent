@@ -58,12 +58,15 @@ seeds 11 and 12 give 18 walls, 126 holds). They were also used while tuning, so 
   the washed-out hold in `light` seed 11 that SAM never segmented.
 - **Takeaways:** next are real photos (these walls were used for tuning) and SAM misses.
 
-## E6: Real gym photos (in progress, Siho, PR #3)
+## E6: Real gym photos (2026-10-29, Siho, PR #3 and 6bc820c)
 - **Question:** how do SAM 3.1 and the agent do on real gym photos?
 - **Setup:** `--photos` with a multi-route `annotations.json`; 8 labelled images / 68 routes derived from a Kaggle
   indoor climbing hold dataset (CC BY-SA 4.0). Photos stay out of git for now and are shared from Siho's
   experiment server.
-- **Results:** full 68-route run pending; the initial 8-route subset is detailed in E9 below.
+- **Results:** on all 68 routes, `meta` reached 60.1% recall / 68.3% precision / 63.9% F1
+  at 30.9 s per route; the single-pass winner reached 56.9% / 56.9% / 56.9% at 16.1 s.
+  The initial 8-route subset is detailed in E9 below; complete runs are in the
+  [leaderboard snapshot](leaderboard.md).
 
 The following detailed studies were recorded before this shared log existed. Their
 dates show when the runs happened; their E numbers follow the order added to this log.
@@ -268,5 +271,58 @@ Rejected: `TOPO_AI_SIDE=960` on the winner (`out/three-stage-v4/`): recall fell
 These entries were exported from the team MCP server. The server database
 retains the full record; this section is the repository snapshot.
 
-No MCP experiment records have been submitted yet.
+### Benchmark record: exp-rank
+
+- Author: siho9o9o
+- Recorded: 2026-10-29T17:18:48+00:00
+- Commit: `88c0463`
+- Tags: benchmark, frontier
+
+> Run bef941cd5f7b4a6db993299a306854d1: F1 34.9%, recall 61.3%, precision 24.4%, mean time 5.6s. No-LLM hybrid ranker: color*embed score + LINK chain (rank method). 0 Spark calls.
+
+### Benchmark record: exp-shortlist
+
+- Author: siho9o9o
+- Recorded: 2026-10-29T17:18:48+00:00
+- Commit: `88c0463`
+- Tags: benchmark, frontier
+
+> Run 80eba4f6f12d42f38a5177548ff836f9: F1 54.5%, recall 54.3%, precision 54.7%, mean time 15.9s. Winner + embedding-first shortlist to 24 cands (META3_SHORTLIST=1). 1 call.
+
+### Benchmark record: meta3-winner
+
+- Author: siho9o9o
+- Recorded: 2026-10-29T15:33:07+00:00
+- Commit: `6bc820c`
+- Tags: benchmark, frontier
+
+> Run 6505b7da6eb34efeba50afdb99654361: F1 56.9%, recall 56.9%, precision 56.9%, mean time 16.1s. Single-pass v3 prompt + DINOv2 embed hints + skip-covered-point + prune-40. 1 Spark call.
+
+### Benchmark record: meta3
+
+- Author: siho9o9o
+- Recorded: 2026-10-29T15:33:07+00:00
+- Commit: `6bc820c`
+- Tags: benchmark, frontier
+
+> Run 7f1d69eda29145bda845f250cfc9f95f: F1 50.1%, recall 54.3%, precision 46.4%, mean time 12.7s. Single-pass pipeline v1 prompt, no embed, no prune. 1 Spark call.
+
+### Benchmark record: meta
+
+- Author: siho9o9o
+- Recorded: 2026-10-29T15:33:07+00:00
+- Commit: `6bc820c`
+- Tags: benchmark, frontier
+
+> Run d3d6a16969cb488dbcf6403ec1d27a0d: F1 63.9%, recall 60.1%, precision 68.3%, mean time 30.9s. ReAct agent (SAM 3.1 + Muse Spark, 6 turns, tools). Team code; env-gated opts off.
 <!-- topo-agent-mcp:end -->
+
+## 2026-10-30: Align MCP scoring with upstream main
+
+The experiment server now scores against upstream commit `9bd7b02` rather than an older
+local checkout. The five scoring functions used by the server (`holds_of`, `match`,
+`summary`, `_inside`, `_covers`) have identical executable bodies in both checkouts.
+After backing up the server database, six existing runs were moved from evaluator
+version `a16e466e` to `23985f59`. Their scores and reported times were not changed;
+the models were not rerun. Future submissions should use the version from
+`get_benchmark`.
