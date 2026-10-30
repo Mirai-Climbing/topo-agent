@@ -81,13 +81,16 @@ flowchart LR
 
 ### Real gym photos: the real test, and our main work now
 
-8 labelled photos from a public indoor climbing dataset (CC BY-SA 4.0), one route per photo, scored with
-`python -m topo_agent.eval --photos` ([E9, E13, E15](docs/experiments.md)). One run each; runs wobble between sessions.
+All 68 annotated routes on 8 photos from a public indoor climbing dataset (CC BY-SA 4.0), scored with
+`python -m topo_agent.eval --photos` and submitted to the team's [leaderboard](docs/leaderboard.md). One run each.
 
-| Method | Recall | Precision | Seconds / photo |
-|---|---|---|---|
-| **`meta`: SAM 3.1 + Muse Spark agent (on `main`)** | **49–60%** | **85%** | **29–33** |
-| Experimental single pass + DINOv2 hints (branch `feat/three-stage`, not on `main`) | 57% | 75% | 17 |
+| Method | Recall | Precision | F1 | Seconds / photo |
+|---|---|---|---|---|
+| **`meta`: SAM 3.1 + Muse Spark agent (on `main`)** | **60%** | **68%** | **0.64** | **31** |
+| Experimental single pass + DINOv2 hints (branch `feat/three-stage`, not on `main`) | 57% | 57% | 0.57 | 16 |
+
+Earlier runs on one route per photo (8 cases, [E9, E13, E15](docs/experiments.md)) gave `meta` 49–60% recall and
+85% precision; runs wobble between sessions.
 
 Real photos are much harder than our drawn walls. What we learned ([learnings](docs/learnings.md)):
 - **It under-picks on dense walls:** the agent finds the right holds but stops early (worst case 3 of 20).
@@ -96,9 +99,8 @@ Real photos are much harder than our drawn walls. What we learned ([learnings](d
   the time.
 - **Real light splits colors:** one route can measure as "green" and "gray", so color is a weaker hint than on drawn walls.
 
-The full run on all 68 routes of these photos is in progress, and so is the comparison with the pre-hackathon methods
-on the same photos. The [real-route leaderboard](docs/leaderboard.md) collects complete runs from the team's
-experiment server.
+Next: raising recall on dense walls and cutting the time, and comparing with the pre-hackathon methods on the same
+photos. The [real-route leaderboard](docs/leaderboard.md) collects complete runs from the team's experiment server.
 
 ### Drawn sample walls: our regression check
 
