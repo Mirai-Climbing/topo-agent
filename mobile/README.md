@@ -9,8 +9,8 @@ thin native apps. No network, no API calls.
   tap-to-inspect, before/after toggle. See its README.
 - `ios/` — SwiftUI scaffold porting the same pipeline (needs an Xcode build;
   see its README).
-- `assets/hold_yolo.pte` — 11 MB model, ExecuTorch 0.6 format, shared by both
-  apps. Reproduce or retrain with `training/`.
+- `assets/hold_yolo.pte` — 40 MB model (YOLO11s-seg, ExecuTorch 0.6 format),
+  shared by both apps. Reproduce or retrain with `training/`.
 
 ## Model contract
 
@@ -22,7 +22,7 @@ thin native apps. No network, no API calls.
 
 ## Data honesty
 
-This `.pte` (run `y11n-seg-b`) saw the 8 scoreboard photos during training
-(Mask mAP50 0.70, optimistic). It is a demo/model-quality build, not a board
-entry. For board numbers, train the clean split (`training/README.md`,
-leakage rule) and re-export.
+This `.pte` (run `yolo11s-seg-clean`) never saw the 8 scoreboard photos:
+Box mAP50 0.822 / Mask mAP50 0.735 held-out. An earlier nano build
+(`y11n-seg-b`, 0.807/0.751) did train on those photos and is kept for
+reference only — see `docs/experiments.md` for the leakage analysis.

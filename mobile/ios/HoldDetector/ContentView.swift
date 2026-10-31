@@ -22,7 +22,7 @@ struct ContentView: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
       Text("Hold detector").font(.title).bold()
-      Text("YOLO11n-seg · one pass, every hold · tap to inspect")
+      Text("YOLO11s-seg · one pass, every hold · tap to inspect")
         .font(.caption).foregroundColor(.secondary)
       Text(status).font(.headline).foregroundColor(.green)
       HStack {

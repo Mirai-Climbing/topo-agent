@@ -400,7 +400,7 @@ class MainActivity : AppCompatActivity() {
         })
     root.addView(
         TextView(this).apply {
-          text = "YOLO11n-seg · one pass, every hold · tap to inspect"
+          text = "YOLO11s-seg · one pass, every hold · tap to inspect"
           setTextColor(MUTED)
           textSize = 13f
           setPadding(0, dp(2), 0, dp(4))
