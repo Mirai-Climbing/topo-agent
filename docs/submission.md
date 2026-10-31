@@ -20,7 +20,7 @@ The reviewer password is never written here or in the form.
 
 ## Project Description
 
-In a bouldering gym, a problem is its color: all of its holds share one color, or one piece of tape. But red-green color vision deficiency affects about one man in twenty in Japan, and for these climbers red and orange can look nearly the same. They have to ask someone which holds they may use.
+In a bouldering gym, a problem is its color: all of its holds share one color, or one piece of tape. But red-green color vision deficiency affects up to one man in twelve (about one in twenty in Japan), and for these climbers red and orange can look nearly the same. They have to ask someone which holds they may use.
 
 topo-agent finds the problem for them. Take a photo of the wall and tap one hold. SAM 3.1 outlines every hold on the wall, and a Muse Spark agent picks only the holds that belong to the same problem, so the problem is visible without telling colors apart. The app shows what the agent did, the climber can add or remove holds, and the result is saved as a shared problem in Mirai Climbing, our climbing app, so nobody has to mark the same problem twice.
 

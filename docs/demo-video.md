@@ -9,7 +9,7 @@ Japanese notes are for the team.
 
 | Time | Picture | Caption / narration |
 |---|---|---|
-| 0:00–0:15 | `docs/images/colorblind.png`, one panel at a time | "In a bouldering gym, a problem is its color. But for about one man in twenty in Japan, red and orange look almost the same. Which holds are mine?" |
+| 0:00–0:15 | `docs/images/colorblind.png`, one panel at a time | "In a bouldering gym, a problem is its color. But up to one man in twelve has red-green color blindness. For them, red and orange can look almost the same. Which holds are mine?" |
 | 0:15–0:30 | Screen recording of the app's home screen; text: "Mirai Climbing · Yuzuki (Japan), Siho (Korea), Ajay" | "Mirai Climbing is an app for climbers. For this hackathon, our team built a topo agent with Meta's models." |
 | 0:30–1:15 | Phone screen recording with the reviewer account: choose a real gym photo from the CC BY-SA 4.0 dataset (one with no people) → Find with AI → tap one hold → "What the AI did" → holds outlined → remove one wrong outline → save as a problem | "Choose a photo, tap one hold. SAM 3.1 outlines every hold on the wall. Then a Muse Spark agent decides which ones belong to the same problem, and shows what it did. You can still add or remove a hold. Saved, it becomes a problem other climbers can find and log." |
 | 1:15–1:50 | Tape sample wall (`tape` scene, seed 11, drawn by `topo_agent/baseline/bench.py`) loaded in the app: "What the AI did" with the agent's note | "Some problems are marked with tape, and the holds are all different colors. A color filter finds one hold out of seven. The agent looks at a close-up first, sees the tape, zooms in on the candidates, and finds all seven." |
@@ -38,6 +38,6 @@ Screen recordings must not show personal data: use the reviewer account, and hid
 ## Notes
 
 - Keep it under 3:00. Show the product first; numbers and architecture after.
-- The color-blindness numbers come from the review linked in the README; say "about one man in twenty in Japan", not more.
+- The color-blindness numbers come from the review linked in the README; say "up to one man in twelve" (men of Northern European descent) or "about one man in twenty in Japan", never "one in twelve" without "up to".
 - Say clearly that the topo agent was built during the hackathon, on top of an existing app.
 - Don't use photos found online, or photos that show people.
