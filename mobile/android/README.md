@@ -41,7 +41,12 @@ Drop any climbing photo at `app/src/main/assets/gym.jpg` to have it detected
 at launch. Without it the app starts in camera-only mode. Real gym photos are
 never committed; see the repo `.gitignore`.
 
-## Measured on Galaxy S23
+## Measured on Galaxy S23 (clean-s model, sample photo, 3 runs)
 
-- Inference: 160-370 ms per photo (XNNPACK)
-- Render (Kotlin NMS + mask assembly): 15-340 ms for 40-100 holds
+- Inference: 390-710 ms per photo (XNNPACK)
+- Render (Kotlin NMS + mask assembly): 220-270 ms for 55-80 holds
+- Nano reference: 160-370 ms infer, 58-74 holds
+
+Note: on-device results vary run to run (two stable modes, 343 vs 423
+candidates) while the same `.pte` is bit-identical across desktop runs —
+device-side XNNPACK threading nondeterminism, not an export bug.
