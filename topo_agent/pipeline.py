@@ -899,6 +899,38 @@ def route_finder(env, on_trace=None, embedder=None):
     return find
 
 
+def yolo_finder(env, on_trace=None, embedder=None):
+    """Find holds with YOLO-seg masks + CV colors + single-pass Spark.
+
+    Same as route_finder with the SAM stage swapped for a local YOLO-seg
+    model (no per-photo segmentation API). TOPO_YOLO_WEIGHTS names the
+    checkpoint, TOPO_YOLO_CONF the detection threshold (default 0.5).
+    (JPEG, point → holds), or None without a key or weights."""
+    from topo_agent import yolo as yolo_mod
+    chat = agent_mod.http_chat(env)
+    weights = os.path.expanduser(env.get("TOPO_YOLO_WEIGHTS", "") or
+                                 "~/data/runs-hold/yolo11s-seg-clean/weights/best.pt")
+    if not (chat and os.path.exists(weights)):
+        return None
+    try:
+        sam = yolo_mod.YoloSeg(weights, conf=float(env.get("TOPO_YOLO_CONF", "0.5")))
+    except ImportError:
+        return None
+    spark = single_call(chat, env.get("META_AGENT_MODEL", agent_mod.MODEL),
+                        env.get("META_AGENT_EFFORT", agent_mod.EFFORT))
+    prompt = env.get("META3_PROMPT", "")
+    use_embed = embed_enabled(env)
+    use_verify = verify_enabled(env)
+    use_shortlist = shortlist_enabled(env)
+    cap = shortlist_max(env)
+
+    def find(jpeg, point, on_trace=on_trace):
+        return find_with(sam, spark, jpeg, point, on_trace, prompt=prompt,
+                         embedder=embedder, use_embed=use_embed, use_verify=use_verify,
+                         use_shortlist=use_shortlist, shortlist_cap=cap)
+    return find
+
+
 RANK_TAP_FRAC = 0.5  # shortlist keeps candidates scoring at least this fraction of the tap's self-score
 RANK_FRAC_ENV = "RANK_TAP_FRAC"  # env override for the shortlist fraction
 RANK_EMBED_ENV = "RANK_EMBED"  # set to "0" to score on color alone (default tries DINOv2)

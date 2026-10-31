@@ -66,7 +66,7 @@ def finders(env, names):
     """Method name → function (JPEG, point → holds). Methods without settings (API keys) are skipped."""
     from topo_agent.agent import meta_hold_finder, sam_color_finder
     from topo_agent.baseline.gemini_agent import color_only, gemini_hold_finder
-    from topo_agent.pipeline import rank_finder, route_finder
+    from topo_agent.pipeline import rank_finder, route_finder, yolo_finder
 
     def color(jpeg, point):
         with Image.open(io.BytesIO(jpeg)) as img:
@@ -74,7 +74,8 @@ def finders(env, names):
 
     made = {"color": lambda: color, "gemini": lambda: gemini_hold_finder(env),
             "sam_color": lambda: sam_color_finder(env), "meta": lambda: meta_hold_finder(env),
-            "meta3": lambda: route_finder(env), "rank": lambda: rank_finder(env)}
+            "meta3": lambda: route_finder(env), "rank": lambda: rank_finder(env),
+            "yolo3s": lambda: yolo_finder(env)}
     out = {}
     for name in names:
         f = made[name]() if name in made else None
