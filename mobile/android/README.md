@@ -8,6 +8,7 @@ No network, no API calls.
 
 - Sample photo (`gym.jpg` asset, optional) detected at launch
 - Camera capture with EXIF rotation handling
+- Gallery pick (system photo picker, no permission needed)
 - Tap a hold to inspect (index + confidence)
 - Before/after toggle
 

@@ -76,6 +76,12 @@ class MainActivity : AppCompatActivity() {
         else setStatus("capture cancelled · %d holds on current photo".format(dets.size))
       }
 
+  private val galleryLauncher =
+      registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) onGalleryImage(uri)
+        else setStatus("pick cancelled · %d holds on current photo".format(dets.size))
+      }
+
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     buildUi()
@@ -176,33 +182,69 @@ class MainActivity : AppCompatActivity() {
     cameraLauncher.launch(uri)
   }
 
+  private fun openGallery() {
+    if (busy) return
+    if (modelFile() == null) {
+      setStatus("push hold_yolo.pte to the app files dir")
+      return
+    }
+    galleryLauncher.launch("image/*")
+  }
+
+  private fun onGalleryImage(uri: android.net.Uri) {
+    thread {
+      runCatching {
+        busy = true
+        val raw =
+            contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
+                ?: error("cannot decode picked image")
+        val orient =
+            contentResolver.openInputStream(uri)?.use {
+              ExifInterface(it).getAttributeInt(
+                  ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+            } ?: ExifInterface.ORIENTATION_NORMAL
+        useExternalPhoto(raw, orient, "gallery")
+      }.onFailure {
+        Log.e(TAG, "gallery failed", it)
+        setStatus("gallery failed: ${it.message}")
+        busy = false
+      }
+    }
+  }
+
   /** Camera photos carry EXIF rotation; apply it before anything else. */
   private fun onCapture() {
     thread {
       runCatching {
         busy = true
         val raw = BitmapFactory.decodeFile(captureFile.absolutePath) ?: error("cannot decode capture")
-        val exif = ExifInterface(captureFile.absolutePath)
-        val orient = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
-        val matrix = Matrix()
-        when (orient) {
-          ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
-          ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
-          ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
-        }
-        val fixed =
-            if (orient == ExifInterface.ORIENTATION_NORMAL) raw
-            else Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, matrix, true)
-        photo = fitBitmap(fixed)
-        hasPhoto = true
-        runOnUiThread { view.setImageBitmap(photo) }
-        detect(modelFile() ?: error("model gone"), "camera")
+        val orient =
+            ExifInterface(captureFile.absolutePath)
+                .getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+        useExternalPhoto(raw, orient, "camera")
       }.onFailure {
         Log.e(TAG, "capture failed", it)
         setStatus("capture failed: ${it.message}")
         busy = false
       }
     }
+  }
+
+  private fun useExternalPhoto(raw: Bitmap, orient: Int, source: String) {
+    val matrix = Matrix()
+    when (orient) {
+      ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+      ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+      ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+    }
+    val fixed =
+        if (orient == ExifInterface.ORIENTATION_NORMAL) raw
+        else Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, matrix, true)
+    photo = fitBitmap(fixed)
+    hasPhoto = true
+    runOnUiThread { view.setImageBitmap(photo) }
+    detect(modelFile() ?: error("model gone"), source)
   }
 
   private fun detect(model: File, source: String) {
@@ -418,6 +460,11 @@ class MainActivity : AppCompatActivity() {
         Button(this).apply {
           text = "Camera"
           setOnClickListener { openCamera() }
+        })
+    root.addView(
+        Button(this).apply {
+          text = "Gallery"
+          setOnClickListener { openGallery() }
         })
     toggleBtn =
         Button(this).apply {
