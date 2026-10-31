@@ -20,7 +20,7 @@ final class YoloSeg {
   private let module: Module
 
   init(modelPath: String) throws {
-    module = try Module(filePath: modelPath)
+    module = Module(filePath: modelPath)
   }
 
   /// Letterbox RGB thinkers: longest side to 640, pad 114, NCHW float32 / 255.
@@ -48,7 +48,10 @@ final class YoloSeg {
         data[2 * s * s + i] = Float(px[o + 2]) / 255.0
       }
     }
-    guard let t = Tensor(shape: [1, 3, s, s], data: data) else { return nil }
+    let shape: [NSNumber] = [1, 3, NSNumber(value: s), NSNumber(value: s)]
+    let t = data.withUnsafeBufferPointer {
+      Tensor(data: Data(buffer: $0), shape: shape, dataType: .float)
+    }
     return (t, Float(scale), Float(padX), Float(padY))
   }
 
@@ -56,8 +59,8 @@ final class YoloSeg {
     guard let (input, scale, padX, padY) = preprocess(image),
           let outputs = try? module.forward([Value(input)]),
           outputs.count >= 2,
-          let det = outputs[0].toTensor()?.data(),
-          let proto = outputs[1].toTensor()?.data() else { return nil }
+          let det = floats(outputs[0]),
+          let proto = floats(outputs[1]) else { return nil }
     let w = Float(image.cgImage!.width), h = Float(image.cgImage!.height)
     var cands: [Detection] = []
     for i in 0..<YoloSeg.anchors {
@@ -75,6 +78,18 @@ final class YoloSeg {
       cands.append(Detection(x1: x1, y1: y1, x2: x2, y2: y2, conf: conf, coefs: coefs))
     }
     return (nms(cands), proto, (scale, padX, padY))
+  }
+
+  /// Copies a float tensor output into an array (ExecuTorch 0.6 has no toTensor()/data()).
+  private func floats(_ value: Value) -> [Float]? {
+    guard let tensor = value.tensor else { return nil }
+    let n = tensor.shape.reduce(1) { $0 * $1.intValue }
+    var out: [Float]?
+    tensor.bytes { pointer, _, dataType in
+      guard dataType == .float else { return }
+      out = Array(UnsafeBufferPointer(start: pointer.assumingMemoryBound(to: Float.self), count: n))
+    }
+    return out
   }
 
   private func nms(_ boxes: [Detection]) -> [Detection] {
