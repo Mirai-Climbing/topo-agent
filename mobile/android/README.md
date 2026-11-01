@@ -9,8 +9,9 @@ Taps group the route offline; with a Muse Spark key they also ask Spark.
 - Sample photo (`gym.jpg` asset, optional) detected at launch
 - Camera capture with EXIF rotation handling
 - Gallery pick (system photo picker, no permission needed)
-- Tap a hold to group its route offline (HS-histogram match ≥ 0.6 stays
-  bright, the rest dim; tap the wall to clear, index + route size in status)
+- Tap a hold to group its route offline (HS-histogram match ≥ 0.6): the
+  route keeps color, everything else goes grayscale, tap frame on the tap;
+  tap the wall to clear, index + route size in status
 - Optional Spark route: paste a `MODEL_API_KEY` in the key row and every tap
   also sends one Spark call (same v3 prompt, table, and photos as the server
   pipeline); the Spark answer replaces the offline grouping, and any failure

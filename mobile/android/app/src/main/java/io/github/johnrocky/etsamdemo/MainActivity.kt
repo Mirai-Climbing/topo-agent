@@ -63,8 +63,8 @@ data class Det(
 
 /**
  * One-shot climbing-hold detector. A YOLO11n-seg model trained on the Kaggle hold dataset runs
- * once per photo; every hold mask is drawn immediately. Tapping a hold groups its route offline:
- * holds whose mask-interior HS histogram matches the tapped hold stay bright, the rest dim.
+ * once per photo; nothing is drawn until a tap. Tapping a hold groups its route offline:
+ * the route keeps color while everything else goes grayscale, with a target frame on the tap.
  * Tapping the wall clears the route. With a Muse Spark API key saved in settings, each tap also
  * asks Spark (one call, same prompt as the server pipeline) and the Spark answer replaces the
  * offline grouping; without a key or on any failure the offline grouping stands.
@@ -86,7 +86,6 @@ class MainActivity : AppCompatActivity() {
   private var route: Set<Int> = emptySet()
   private var rows: List<SparkRoute.HoldRow> = emptyList()
   @Volatile private var sparkBusy = false
-  private var sparkDone = false
   private lateinit var timerView: TextView
   private val timerHandler = Handler(Looper.getMainLooper())
   private var sparkStartMs = 0L
@@ -315,7 +314,6 @@ class MainActivity : AppCompatActivity() {
     dets = nms(cands)
     selected = -1
     route = emptySet()
-    sparkDone = false
     rows = SparkRoute.classify(photo, dets, protoCache)
     hists = rows.map { it.hist }
     Log.i(TAG, "yolo: ${dets.size} holds after NMS (${cands.size} candidates), infer ${inferMs}ms")
@@ -339,10 +337,10 @@ class MainActivity : AppCompatActivity() {
   }
 
   /**
-   * Tint every mask. With no selection all share one alpha; after a tap the tapped hold is
-   * brightest, its route stays visible, the rest dim. Once Spark confirms the route, everything
-   * outside it goes grayscale and only the route keeps color. The tapped hold always gets a
-   * black-and-white target frame.
+   * Holds are never tinted. With no selection the photo shows as-is; after a tap everything
+   * outside the tapped hold's route goes grayscale and only the route keeps color, whether the
+   * route came from offline grouping or Spark. The tapped hold always gets a black-and-white
+   * target frame.
    */
   private fun render() {
     val start = System.nanoTime()
@@ -351,17 +349,17 @@ class MainActivity : AppCompatActivity() {
     val base = IntArray(w * h)
     photo.getPixels(base, 0, w, 0, 0, w, h)
     val out = base.copyOf()
-    val scale = SIDE / maxOf(w, h).toFloat()
-    val padX = (SIDE - w * scale) / 2f
-    val padY = (SIDE - h * scale) / 2f
-    val confirmed = sparkDone && selected >= 0 && route.isNotEmpty()
-    val masks = mutableMapOf<Int, SparkRoute.MaskBox?>()
-    fun maskOf(idx: Int) =
-        masks.getOrPut(idx) { SparkRoute.holdMask(dets[idx], w, h, scale, padX, padY, protoCache) }
-    if (confirmed) {
+    val grouped = selected >= 0 && route.isNotEmpty()
+    if (grouped) {
+      val scale = SIDE / maxOf(w, h).toFloat()
+      val padX = (SIDE - w * scale) / 2f
+      val padY = (SIDE - h * scale) / 2f
       val cover = BooleanArray(w * h)
       for (idx in route) {
-        val m = if (idx in dets.indices) maskOf(idx) else null
+        val m =
+            if (idx in dets.indices)
+                SparkRoute.holdMask(dets[idx], w, h, scale, padX, padY, protoCache)
+            else null
         if (m == null) continue
         for (y in 0 until m.bh) {
           for (x in 0 until m.bw) {
@@ -376,36 +374,6 @@ class MainActivity : AppCompatActivity() {
             ((c shr 16 and 0xFF) * 0.299f + (c shr 8 and 0xFF) * 0.587f + (c and 0xFF) * 0.114f)
                 .toInt()
         out[o] = Color.rgb(lum, lum, lum)
-      }
-    }
-    val order = dets.indices.sortedBy { if (it == selected) 1 else 0 }
-    for (idx in order) {
-      if (confirmed && idx !in route) continue
-      val d = dets[idx]
-      val color = palette(idx)
-      val alpha =
-          when {
-            idx == selected -> 0.8f
-            selected < 0 -> 0.45f
-            idx in route -> 0.55f
-            else -> 0.10f
-          }
-      val cr = (color shr 16 and 0xFF) * alpha
-      val cg = (color shr 8 and 0xFF) * alpha
-      val cb = (color and 0xFF) * alpha
-      val m = maskOf(idx) ?: continue
-      for (y in 0 until m.bh) {
-        for (x in 0 until m.bw) {
-          if (!m.bin[y * m.bw + x]) continue
-          val o = (m.by0 + y) * w + (m.bx0 + x)
-          val c = base[o]
-          out[o] =
-              Color.rgb(
-                  ((c shr 16 and 0xFF) * (1 - alpha) + cr).toInt(),
-                  ((c shr 8 and 0xFF) * (1 - alpha) + cg).toInt(),
-                  ((c and 0xFF) * (1 - alpha) + cb).toInt(),
-              )
-        }
       }
     }
     Log.i(TAG, "render %.0f ms for %d masks".format((System.nanoTime() - start) / 1e6, dets.size))
@@ -435,15 +403,6 @@ class MainActivity : AppCompatActivity() {
 
   private var protoCache: FloatArray = FloatArray(0)
 
-  private fun palette(i: Int): Int {
-    val colors =
-        intArrayOf(
-            0xFF4FC3F7.toInt(), 0xFFAED581.toInt(), 0xFFFFB74D.toInt(), 0xFFBA68C8.toInt(),
-            0xFFFF8A65.toInt(), 0xFF7986CB.toInt(), 0xFF4DB6AC.toInt(), 0xFFF06292.toInt(),
-        )
-    return colors[i % colors.size]
-  }
-
   private fun select(x: Float, y: Float) {
     if (busy || dets.isEmpty() || !hasPhoto) return
     // Smallest containing box wins: taps land on holds, not on the wall behind them.
@@ -462,14 +421,12 @@ class MainActivity : AppCompatActivity() {
       if (selected >= 0) {
         selected = -1
         route = emptySet()
-        sparkDone = false
-        render()
+            render()
         setStatus("%d holds · tap a hold".format(dets.size))
       }
       return
     }
     selected = best
-    sparkDone = false
     route =
         if (hists.size == dets.size)
             dets.indices.filter { SparkRoute.histSim(hists[best], hists[it]) >= ROUTE_SIM }.toSet()
@@ -519,7 +476,6 @@ class MainActivity : AppCompatActivity() {
             return@runOnUiThread
           }
           route = ans.ids.toSet()
-          sparkDone = true
           render()
           setStatus("hold #%d · spark route %d/%d · conf %.2f · %.0f ms"
               .format(tapId, route.size, dets.size, ans.confidence, ms))
