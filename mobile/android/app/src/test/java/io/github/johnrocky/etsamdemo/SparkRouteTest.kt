@@ -75,6 +75,13 @@ class SparkRouteTest {
   }
 
   @Test
+  fun overlayIsMutableForCanvasDrawing() {
+    val bmp = SparkRoute.newOverlay(IntArray(16) { 0xFF000000.toInt() }, 4, 4)
+    assertTrue(bmp.isMutable) // regressed once: immutable bitmap crashed drawTapFrame
+    assertEquals(4, bmp.width)
+  }
+
+  @Test
   fun parseAnswerAcceptsValidRoutes() {
     val ans = SparkRoute.parseAnswer(
         "{\"hold_ids\": [2, 0], \"confidence\": 0.9}", setOf(0, 1, 2), 0)

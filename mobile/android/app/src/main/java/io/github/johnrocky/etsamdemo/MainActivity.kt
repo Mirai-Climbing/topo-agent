@@ -2,13 +2,19 @@ package io.github.johnrocky.etsamdemo
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Matrix
+import android.graphics.Paint
 import android.graphics.Typeface
 import android.media.ExifInterface
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.MotionEvent
+import android.view.View
 import android.text.InputType
 import android.view.ViewGroup
 import android.widget.Button
@@ -80,6 +86,19 @@ class MainActivity : AppCompatActivity() {
   private var route: Set<Int> = emptySet()
   private var rows: List<SparkRoute.HoldRow> = emptyList()
   @Volatile private var sparkBusy = false
+  private var sparkDone = false
+  private lateinit var timerView: TextView
+  private val timerHandler = Handler(Looper.getMainLooper())
+  private var sparkStartMs = 0L
+  private val timerTick =
+      object : Runnable {
+        override fun run() {
+          if (!sparkBusy) return
+          timerView.text =
+              "asking spark… %.1f s".format((SystemClock.elapsedRealtime() - sparkStartMs) / 1000.0)
+          timerHandler.postDelayed(this, 100)
+        }
+      }
   private var captureFile = File("")
   @Volatile private var busy = true
 
@@ -296,6 +315,7 @@ class MainActivity : AppCompatActivity() {
     dets = nms(cands)
     selected = -1
     route = emptySet()
+    sparkDone = false
     rows = SparkRoute.classify(photo, dets, protoCache)
     hists = rows.map { it.hist }
     Log.i(TAG, "yolo: ${dets.size} holds after NMS (${cands.size} candidates), infer ${inferMs}ms")
@@ -319,8 +339,10 @@ class MainActivity : AppCompatActivity() {
   }
 
   /**
-   * Tint every mask. With no selection all masks share one alpha; once a hold is tapped the
-   * tapped hold is brightest, its route stays visible, and the rest dim nearly away.
+   * Tint every mask. With no selection all share one alpha; after a tap the tapped hold is
+   * brightest, its route stays visible, the rest dim. Once Spark confirms the route, everything
+   * outside it goes grayscale and only the route keeps color. The tapped hold always gets a
+   * black-and-white target frame.
    */
   private fun render() {
     val start = System.nanoTime()
@@ -332,8 +354,33 @@ class MainActivity : AppCompatActivity() {
     val scale = SIDE / maxOf(w, h).toFloat()
     val padX = (SIDE - w * scale) / 2f
     val padY = (SIDE - h * scale) / 2f
+    val confirmed = sparkDone && selected >= 0 && route.isNotEmpty()
+    val masks = mutableMapOf<Int, SparkRoute.MaskBox?>()
+    fun maskOf(idx: Int) =
+        masks.getOrPut(idx) { SparkRoute.holdMask(dets[idx], w, h, scale, padX, padY, protoCache) }
+    if (confirmed) {
+      val cover = BooleanArray(w * h)
+      for (idx in route) {
+        val m = if (idx in dets.indices) maskOf(idx) else null
+        if (m == null) continue
+        for (y in 0 until m.bh) {
+          for (x in 0 until m.bw) {
+            if (m.bin[y * m.bw + x]) cover[(m.by0 + y) * w + (m.bx0 + x)] = true
+          }
+        }
+      }
+      for (o in out.indices) {
+        if (cover[o]) continue
+        val c = out[o]
+        val lum =
+            ((c shr 16 and 0xFF) * 0.299f + (c shr 8 and 0xFF) * 0.587f + (c and 0xFF) * 0.114f)
+                .toInt()
+        out[o] = Color.rgb(lum, lum, lum)
+      }
+    }
     val order = dets.indices.sortedBy { if (it == selected) 1 else 0 }
     for (idx in order) {
+      if (confirmed && idx !in route) continue
       val d = dets[idx]
       val color = palette(idx)
       val alpha =
@@ -346,7 +393,7 @@ class MainActivity : AppCompatActivity() {
       val cr = (color shr 16 and 0xFF) * alpha
       val cg = (color shr 8 and 0xFF) * alpha
       val cb = (color and 0xFF) * alpha
-      val m = SparkRoute.holdMask(d, w, h, scale, padX, padY, protoCache) ?: continue
+      val m = maskOf(idx) ?: continue
       for (y in 0 until m.bh) {
         for (x in 0 until m.bw) {
           if (!m.bin[y * m.bw + x]) continue
@@ -362,9 +409,28 @@ class MainActivity : AppCompatActivity() {
       }
     }
     Log.i(TAG, "render %.0f ms for %d masks".format((System.nanoTime() - start) / 1e6, dets.size))
-    overlayBmp = Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
+    overlayBmp = SparkRoute.newOverlay(out, w, h)
+    if (selected >= 0 && selected < dets.size) drawTapFrame(overlayBmp!!, dets[selected])
     showOverlay = true
     updateView()
+  }
+
+  /** Black-and-white target frame around the tapped hold's box: visible on any wall. */
+  internal fun drawTapFrame(bmp: Bitmap, d: Det) {
+    val canvas = Canvas(bmp)
+    val pad = 8f
+    val outer = Paint().apply {
+      style = Paint.Style.STROKE
+      strokeWidth = 10f
+      color = Color.BLACK
+    }
+    val inner = Paint().apply {
+      style = Paint.Style.STROKE
+      strokeWidth = 5f
+      color = Color.WHITE
+    }
+    canvas.drawRect(d.x1 - pad, d.y1 - pad, d.x2 + pad, d.y2 + pad, outer)
+    canvas.drawRect(d.x1 - pad, d.y1 - pad, d.x2 + pad, d.y2 + pad, inner)
   }
 
   private var protoCache: FloatArray = FloatArray(0)
@@ -396,12 +462,14 @@ class MainActivity : AppCompatActivity() {
       if (selected >= 0) {
         selected = -1
         route = emptySet()
+        sparkDone = false
         render()
         setStatus("%d holds · tap a hold".format(dets.size))
       }
       return
     }
     selected = best
+    sparkDone = false
     route =
         if (hists.size == dets.size)
             dets.indices.filter { SparkRoute.histSim(hists[best], hists[it]) >= ROUTE_SIM }.toSet()
@@ -423,6 +491,9 @@ class MainActivity : AppCompatActivity() {
     if (rows.size != dets.size || tapId !in dets.indices) return
     sparkBusy = true
     setStatus("hold #%d · asking spark…".format(tapId))
+    sparkStartMs = SystemClock.elapsedRealtime()
+    timerView.visibility = View.VISIBLE
+    timerHandler.post(timerTick)
     val snapPhoto = photo
     val snapDets = dets.toList()
     val snapRows = rows
@@ -440,12 +511,15 @@ class MainActivity : AppCompatActivity() {
         val ans = SparkRoute.parseAnswer(text, snapDets.indices.toSet(), tapId)
         runOnUiThread {
           sparkBusy = false
+          timerHandler.removeCallbacks(timerTick)
+          timerView.visibility = View.GONE
           if (selected != tapId || dets.size != snapDets.size) return@runOnUiThread
           if (ans.error.isNotEmpty()) {
             setStatus("hold #%d · spark unclear (%s), offline route kept".format(tapId, ans.error))
             return@runOnUiThread
           }
           route = ans.ids.toSet()
+          sparkDone = true
           render()
           setStatus("hold #%d · spark route %d/%d · conf %.2f · %.0f ms"
               .format(tapId, route.size, dets.size, ans.confidence, ms))
@@ -455,6 +529,8 @@ class MainActivity : AppCompatActivity() {
         Log.w(TAG, "spark failed", e)
         runOnUiThread {
           sparkBusy = false
+          timerHandler.removeCallbacks(timerTick)
+          timerView.visibility = View.GONE
           if (selected == tapId)
               setStatus("hold #%d · spark failed (%s), offline route kept"
                   .format(tapId, (e.message ?: "error").take(60)))
@@ -494,6 +570,16 @@ class MainActivity : AppCompatActivity() {
           setPadding(0, 0, 0, dp(10))
         }
     root.addView(status)
+    timerView =
+        TextView(this).apply {
+          text = "asking spark… 0.0 s"
+          setTextColor(Color.WHITE)
+          textSize = 22f
+          setTypeface(typeface, Typeface.BOLD)
+          setPadding(0, 0, 0, dp(8))
+          visibility = View.GONE
+        }
+    root.addView(timerView)
     root.addView(
         Button(this).apply {
           text = "Camera"

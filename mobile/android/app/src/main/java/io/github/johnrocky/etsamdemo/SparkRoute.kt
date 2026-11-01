@@ -480,6 +480,14 @@ Instructions:
     return Answer(out.take(MAX_HOLDS), conf, "")
   }
 
+  /**
+   * A mutable overlay bitmap from raw pixels. createBitmap alone is immutable and crashes
+   * Canvas drawing (tap frame), so the copy matters.
+   */
+  fun newOverlay(pixels: IntArray, w: Int, h: Int): Bitmap =
+      Bitmap.createBitmap(pixels, w, h, Bitmap.Config.ARGB_8888)
+          .copy(Bitmap.Config.ARGB_8888, true)
+
   // --- mask math (shared with MainActivity rendering) ---
 
   data class MaskBox(val bx0: Int, val by0: Int, val bw: Int, val bh: Int, val bin: BooleanArray)
