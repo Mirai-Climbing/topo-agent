@@ -125,6 +125,31 @@ Hard sample walls drawn by code ([`topo_agent/baseline/bench.py`](topo_agent/bas
 
 Every experiment, including the ones that didn't work, is in the [experiment log](docs/experiments.md).
 
+## Try it (for judges)
+
+No account or login is needed. Everything below runs from this repository.
+
+```bash
+python -m venv .venv
+.venv/Scripts/pip install -e .    # Windows; use .venv/bin/pip elsewhere
+
+# Without a key: replay a recorded run on a drawn sample wall (no API call, clearly marked RECORDED)
+.venv/Scripts/python -m topo_agent.demo                  # tape problem: holds of all colors, marked by white tape
+.venv/Scripts/python -m topo_agent.demo --scene twins    # the same color on the next wall, in another problem
+
+# With a Meta Model API key: run SAM 3.1 + Muse Spark for real
+export MODEL_API_KEY=...                                 # PowerShell: $env:MODEL_API_KEY="..."
+.venv/Scripts/python -m topo_agent.demo --live --scene tape
+.venv/Scripts/python -m topo_agent.demo --live --photo wall.jpg --tap 0.42,0.63   # your own photo; tap as 0-1 fractions
+```
+
+Each run prints "What the AI did" (every tool call and the agent's one-sentence reason) and writes
+`demo-result.png` with the problem outlined. On the sample walls it also checks the answer. The recorded runs in
+[`topo_agent/demo_runs/`](topo_agent/demo_runs) are real outputs of `--live` on Nov 1, 2026 (7 of 7 holds on each
+wall); the drawn walls are also what we tuned on, so see the real-photo results above for the honest picture.
+
+The agent also runs in production in our app, Mirai Climbing. That needs a login, so the demo video shows it instead.
+
 ## Run it
 
 ```bash
@@ -155,7 +180,7 @@ Everything except `topo_agent/baseline/` was written during the hackathon (from 
   hackathon**. It is kept only as a baseline to compare against.
 - The scoring code in `topo_agent/eval.py` started from the app's evaluation script (also in the first commit)
   and was extended during the hackathon with the `sam_color` and `meta` methods.
-- New during the hackathon: `topo_agent/sam.py` (SAM 3.1), `topo_agent/agent.py` (Muse Spark agent),
+- New during the hackathon: `topo_agent/sam.py` (SAM 3.1), `topo_agent/agent.py` (Muse Spark agent), `topo_agent/demo.py` (the judge demo),
   their tests, and this README. See the commit history after the `pre-hackathon` tag.
 
 ## License
