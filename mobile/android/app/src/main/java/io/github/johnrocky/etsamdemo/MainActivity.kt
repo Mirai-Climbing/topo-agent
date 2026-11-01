@@ -9,8 +9,10 @@ import android.media.ExifInterface
 import android.os.Bundle
 import android.util.Log
 import android.view.MotionEvent
+import android.text.InputType
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -19,21 +21,19 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
 import java.io.File
 import kotlin.concurrent.thread
-import kotlin.math.exp
-import kotlin.math.sqrt
 import org.pytorch.executorch.EValue
 import org.pytorch.executorch.Module
 import org.pytorch.executorch.Tensor
 
-private const val TAG = "ETSAMDemo"
+internal const val TAG = "ETSAMDemo"
 
 private const val BACKGROUND = 0xFF101014.toInt()
 private const val ACCENT = 0xFF6FE3B4.toInt()
 private const val MUTED = 0xFF9AA0A6.toInt()
 
-private const val SIDE = 640
-private const val PROTO = 160
-private const val COEFS = 32
+internal const val SIDE = 640
+internal const val PROTO = 160
+internal const val COEFS = 32
 private const val ANCHORS = 8400
 private const val CONF_THRESH = 0.5f
 private const val NMS_THRESH = 0.5f
@@ -41,12 +41,12 @@ private const val MAX_DETS = 100
 /** Detection and overlay run on this; the phone screen cannot show more anyway. */
 private const val MAX_SIDE = 1400
 /** Hue/saturation bins of the per-hold color histogram used for route grouping. */
-private const val HIST_H = 16
-private const val HIST_S = 16
+internal const val HIST_H = 16
+internal const val HIST_S = 16
 /** Holds at least this similar (Bhattacharyya) to the tapped hold count as its route. */
 private const val ROUTE_SIM = 0.6f
 
-private data class Det(
+data class Det(
     val x1: Float,
     val y1: Float,
     val x2: Float,
@@ -59,7 +59,9 @@ private data class Det(
  * One-shot climbing-hold detector. A YOLO11n-seg model trained on the Kaggle hold dataset runs
  * once per photo; every hold mask is drawn immediately. Tapping a hold groups its route offline:
  * holds whose mask-interior HS histogram matches the tapped hold stay bright, the rest dim.
- * Tapping the wall clears the route.
+ * Tapping the wall clears the route. With a Muse Spark API key saved in settings, each tap also
+ * asks Spark (one call, same prompt as the server pipeline) and the Spark answer replaces the
+ * offline grouping; without a key or on any failure the offline grouping stands.
  *
  * Model contract (ExecuTorch export of the ultralytics seg head):
  * - input [1,3,640,640] letterboxed RGB / 255, pad value 114
@@ -76,6 +78,8 @@ class MainActivity : AppCompatActivity() {
   private var selected = -1
   private var hists: List<FloatArray> = emptyList()
   private var route: Set<Int> = emptySet()
+  private var rows: List<SparkRoute.HoldRow> = emptyList()
+  @Volatile private var sparkBusy = false
   private var captureFile = File("")
   @Volatile private var busy = true
 
@@ -292,7 +296,8 @@ class MainActivity : AppCompatActivity() {
     dets = nms(cands)
     selected = -1
     route = emptySet()
-    hists = colorHists()
+    rows = SparkRoute.classify(photo, dets, protoCache)
+    hists = rows.map { it.hist }
     Log.i(TAG, "yolo: ${dets.size} holds after NMS (${cands.size} candidates), infer ${inferMs}ms")
     render()
     setStatus(
@@ -341,7 +346,7 @@ class MainActivity : AppCompatActivity() {
       val cr = (color shr 16 and 0xFF) * alpha
       val cg = (color shr 8 and 0xFF) * alpha
       val cb = (color and 0xFF) * alpha
-      val m = holdMask(d, w, h, scale, padX, padY) ?: continue
+      val m = SparkRoute.holdMask(d, w, h, scale, padX, padY, protoCache) ?: continue
       for (y in 0 until m.bh) {
         for (x in 0 until m.bw) {
           if (!m.bin[y * m.bw + x]) continue
@@ -363,118 +368,6 @@ class MainActivity : AppCompatActivity() {
   }
 
   private var protoCache: FloatArray = FloatArray(0)
-
-  private fun protoAt(ch: Int, p: Int): Float = protoCache[ch * PROTO * PROTO + p]
-
-  private data class MaskBox(
-      val bx0: Int,
-      val by0: Int,
-      val bw: Int,
-      val bh: Int,
-      val bin: BooleanArray,
-  )
-
-  /** Binary hold mask at photo resolution over the detection box, or null for empty boxes. */
-  private fun holdMask(d: Det, w: Int, h: Int, scale: Float, padX: Float, padY: Float): MaskBox? {
-    // Sigmoid mask at proto resolution over the box region (plus a 1-cell margin),
-    // then bilinear-upsampled to photo pixels: smooth edges instead of 160-grid blocks.
-    val gx0 = (d.x1 * scale + padX) / 4
-    val gy0 = (d.y1 * scale + padY) / 4
-    val gx1 = (d.x2 * scale + padX) / 4
-    val gy1 = (d.y2 * scale + padY) / 4
-    val ix0 = (gx0.toInt() - 1).coerceIn(0, PROTO - 1)
-    val iy0 = (gy0.toInt() - 1).coerceIn(0, PROTO - 1)
-    val ix1 = (gx1.toInt() + 1).coerceIn(0, PROTO - 1)
-    val iy1 = (gy1.toInt() + 1).coerceIn(0, PROTO - 1)
-    val mw = ix1 - ix0 + 1
-    val mh = iy1 - iy0 + 1
-    val small = FloatArray(mw * mh)
-    for (cy in 0 until mh) {
-      for (cx in 0 until mw) {
-        val p = (iy0 + cy) * PROTO + (ix0 + cx)
-        var v = 0f
-        for (k in 0 until COEFS) v += d.coefs[k] * protoAt(k, p)
-        small[cy * mw + cx] = 1f / (1f + exp(-v))
-      }
-    }
-    val bx0 = d.x1.toInt().coerceIn(0, w - 1)
-    val by0 = d.y1.toInt().coerceIn(0, h - 1)
-    val bx1 = d.x2.toInt().coerceIn(0, w)
-    val by1 = d.y2.toInt().coerceIn(0, h)
-    val bw = bx1 - bx0
-    val bh = by1 - by0
-    if (bw <= 0 || bh <= 0) return null
-    // Binary mask at photo resolution over the box.
-    val bin = BooleanArray(bw * bh)
-    for (y in 0 until bh) {
-      val fy = ((by0 + y + 0.5f) * scale + padY) / 4 - iy0
-      val y0 = fy.toInt().coerceIn(0, mh - 1)
-      val y1 = (y0 + 1).coerceIn(0, mh - 1)
-      val wy = (fy - fy.toInt()).coerceIn(0f, 1f)
-      for (x in 0 until bw) {
-        val fx = ((bx0 + x + 0.5f) * scale + padX) / 4 - ix0
-        val x0 = fx.toInt().coerceIn(0, mw - 1)
-        val x1 = (x0 + 1).coerceIn(0, mw - 1)
-        val wx = (fx - fx.toInt()).coerceIn(0f, 1f)
-        val v =
-            small[y0 * mw + x0] * (1 - wx) * (1 - wy) +
-                small[y0 * mw + x1] * wx * (1 - wy) +
-                small[y1 * mw + x0] * (1 - wx) * wy +
-                small[y1 * mw + x1] * wx * wy
-        bin[y * bw + x] = v > 0.5f
-      }
-    }
-    return MaskBox(bx0, by0, bw, bh, bin)
-  }
-
-  /** Normalized 16x16 HS histogram over mask-interior photo pixels (stride 2 for speed). */
-  private fun holdHist(
-      d: Det,
-      base: IntArray,
-      w: Int,
-      h: Int,
-      scale: Float,
-      padX: Float,
-      padY: Float,
-  ): FloatArray {
-    val hist = FloatArray(HIST_H * HIST_S)
-    val m = holdMask(d, w, h, scale, padX, padY) ?: return hist
-    val hsv = FloatArray(3)
-    var n = 0
-    for (y in 0 until m.bh step 2) {
-      for (x in 0 until m.bw step 2) {
-        if (!m.bin[y * m.bw + x]) continue
-        Color.colorToHSV(base[(m.by0 + y) * w + (m.bx0 + x)], hsv)
-        val hi = (hsv[0] / 360f * HIST_H).toInt().coerceIn(0, HIST_H - 1)
-        val si = (hsv[1] * HIST_S).toInt().coerceIn(0, HIST_S - 1)
-        hist[hi * HIST_S + si] += 1f
-        n++
-      }
-    }
-    if (n > 0) for (i in hist.indices) hist[i] /= n
-    return hist
-  }
-
-  private fun colorHists(): List<FloatArray> {
-    val start = System.nanoTime()
-    val w = photo.width
-    val h = photo.height
-    val base = IntArray(w * h)
-    photo.getPixels(base, 0, w, 0, 0, w, h)
-    val scale = SIDE / maxOf(w, h).toFloat()
-    val padX = (SIDE - w * scale) / 2f
-    val padY = (SIDE - h * scale) / 2f
-    val out = dets.map { holdHist(it, base, w, h, scale, padX, padY) }
-    Log.i(TAG, "hist %.0f ms for %d holds".format((System.nanoTime() - start) / 1e6, out.size))
-    return out
-  }
-
-  /** Bhattacharyya coefficient of two normalized histograms (1 = same distribution). */
-  private fun histSim(a: FloatArray, b: FloatArray): Float {
-    var s = 0f
-    for (i in a.indices) s += sqrt(a[i] * b[i])
-    return s.coerceIn(0f, 1f)
-  }
 
   private fun palette(i: Int): Int {
     val colors =
@@ -511,12 +404,61 @@ class MainActivity : AppCompatActivity() {
     selected = best
     route =
         if (hists.size == dets.size)
-            dets.indices.filter { histSim(hists[best], hists[it]) >= ROUTE_SIM }.toSet()
+            dets.indices.filter { SparkRoute.histSim(hists[best], hists[it]) >= ROUTE_SIM }.toSet()
         else setOf(best)
     val d = dets[best]
     render()
     setStatus("hold #%d · route %d/%d holds · conf %.2f".format(best, route.size, dets.size, d.conf))
     Log.i(TAG, "tap ($x, $y) -> hold #$best route ${route.size}")
+    askSpark(best)
+  }
+
+  private fun sparkKey(): String =
+      getSharedPreferences("topo", MODE_PRIVATE).getString("spark_key", "")?.trim() ?: ""
+
+  /** One Spark call for the tapped route; the answer replaces the offline grouping. */
+  private fun askSpark(tapId: Int) {
+    val key = sparkKey()
+    if (key.isEmpty() || sparkBusy) return
+    if (rows.size != dets.size || tapId !in dets.indices) return
+    sparkBusy = true
+    setStatus("hold #%d · asking spark…".format(tapId))
+    val snapPhoto = photo
+    val snapDets = dets.toList()
+    val snapRows = rows
+    thread {
+      try {
+        val table = SparkRoute.buildTable(snapRows, tapId)
+        val small = SparkRoute.jpegBytes(SparkRoute.smallPhoto(snapPhoto))
+        val annotated = SparkRoute.jpegBytes(SparkRoute.annotate(snapPhoto, snapDets, tapId))
+        val closeUp = SparkRoute.jpegBytes(SparkRoute.closeUp(snapPhoto, snapDets[tapId], tapId))
+        val start = System.nanoTime()
+        val text = SparkRoute.askSpark(key, SparkRoute.requestBody(table, small, annotated, closeUp))
+        val ms = (System.nanoTime() - start) / 1e6
+        val ans = SparkRoute.parseAnswer(text, snapDets.indices.toSet(), tapId)
+        runOnUiThread {
+          sparkBusy = false
+          if (selected != tapId || dets.size != snapDets.size) return@runOnUiThread
+          if (ans.error.isNotEmpty()) {
+            setStatus("hold #%d · spark unclear (%s), offline route kept".format(tapId, ans.error))
+            return@runOnUiThread
+          }
+          route = ans.ids.toSet()
+          render()
+          setStatus("hold #%d · spark route %d/%d · conf %.2f · %.0f ms"
+              .format(tapId, route.size, dets.size, ans.confidence, ms))
+          Log.i(TAG, "spark tap #$tapId -> ${route.size} holds conf ${ans.confidence} ${ms}ms")
+        }
+      } catch (e: Exception) {
+        Log.w(TAG, "spark failed", e)
+        runOnUiThread {
+          sparkBusy = false
+          if (selected == tapId)
+              setStatus("hold #%d · spark failed (%s), offline route kept"
+                  .format(tapId, (e.message ?: "error").take(60)))
+        }
+      }
+    }
   }
 
   private fun buildUi() {
@@ -536,7 +478,7 @@ class MainActivity : AppCompatActivity() {
         })
     root.addView(
         TextView(this).apply {
-          text = "YOLO11s-seg · one pass, every hold · tap to inspect"
+          text = "YOLO11s-seg · one pass, every hold · tap to group the route"
           setTextColor(MUTED)
           textSize = 13f
           setPadding(0, dp(2), 0, dp(4))
@@ -569,6 +511,35 @@ class MainActivity : AppCompatActivity() {
           }
         }
     root.addView(toggleBtn)
+    val keyRow =
+        LinearLayout(this).apply {
+          orientation = LinearLayout.HORIZONTAL
+          setPadding(0, dp(6), 0, dp(6))
+        }
+    val keyField =
+        EditText(this).apply {
+          hint = if (sparkKey().isEmpty()) "Spark API key (optional)" else "Spark key saved · tap Save to replace"
+          inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+          setTextColor(Color.WHITE)
+          setHintTextColor(MUTED)
+          textSize = 13f
+          layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+    keyRow.addView(keyField)
+    keyRow.addView(
+        Button(this).apply {
+          text = "Save"
+          setOnClickListener {
+            val v = keyField.text.toString().trim()
+            getSharedPreferences("topo", MODE_PRIVATE).edit().putString("spark_key", v).apply()
+            keyField.text.clear()
+            keyField.hint =
+                if (v.isEmpty()) "Spark API key (optional)" else "Spark key saved · tap Save to replace"
+            setStatus(if (v.isEmpty()) "spark key cleared · offline grouping only"
+                else "spark key saved · taps now ask spark")
+          }
+        })
+    root.addView(keyRow)
 
     view =
         ImageView(this).apply {
