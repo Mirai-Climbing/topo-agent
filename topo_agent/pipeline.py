@@ -25,6 +25,8 @@ hold chains to recover shadowed routes.
 Optionally (META3_EMBED=1), DINOv2 hold-crop embeddings add a per-hold top-similar
 list to the Spark table as a second similarity signal next to color. torch stays a
 lazy optional dependency: without it the pipeline silently runs without hints.
+Optionally (META3_HIST=1), HS-histogram matches add a third per-hold top-similar
+list; histograms need no model, so these hints are always available.
 
 Optionally (META3_VERIFY=1), a second Spark call re-checks the first answer for
 precision: close-up tiles of the answered holds (at most VERIFY_MAX_TILES, the tap
@@ -74,6 +76,8 @@ EMBED_MARGIN = 0.15  # crop grows past the outline by this fraction of its box
 EMBED_MEAN = (0.485, 0.456, 0.406)  # DINOv2 input normalization
 EMBED_STD = (0.229, 0.224, 0.225)
 EMBED_BATCH = 32  # crops per forward pass
+HIST_ENV = "META3_HIST"  # set to "1" to add HS-histogram similarity hints to the Spark table (default off)
+HIST_TOP_K = 3  # similar holds listed per row (ids with Bhattacharyya scores)
 SHORTLIST_ENV = "META3_SHORTLIST"  # set to "1" to shortlist candidates before Spark (default off)
 SHORTLIST_MAX_ENV = "META3_SHORTLIST_MAX"  # shortlist cap (default SHORTLIST_MAX)
 SHORTLIST_MAX = 24  # dense walls show 100+ holds; Spark sees only the most relevant rows
@@ -344,6 +348,13 @@ def embed_enabled(env=None):
     return os.environ.get(EMBED_ENV) == "1"
 
 
+def hist_enabled(env=None):
+    """True when META3_HIST=1 (default off). An explicit env dict entry wins over os.environ."""
+    if env is not None and HIST_ENV in env:
+        return str(env[HIST_ENV]) == "1"
+    return os.environ.get(HIST_ENV) == "1"
+
+
 def verify_enabled(env=None):
     """True when META3_VERIFY=1 (default off). An explicit env dict entry wins over os.environ."""
     if env is not None and VERIFY_ENV in env:
@@ -450,6 +461,25 @@ def add_embed_similar(img, cands, embedder=None, top_k=EMBED_TOP_K):
                         for j in range(len(cands)) if j != i)
         top = ranked[-top_k:][::-1] if top_k > 0 else []
         c["embed_top"] = [(oid, round(score, 3)) for score, oid in top]
+    return cands
+
+
+def add_hist_similar(cands, top_k=HIST_TOP_K):
+    """Set c["hist_top"] to [(id, Bhattacharyya)...] of the top_k most similar other holds.
+
+    Histograms come from classify_colors, so this needs no model and never fails:
+    holds without one simply get an empty list."""
+    for c in cands:
+        c["hist_top"] = []
+    if len(cands) < 2 or top_k <= 0:
+        return cands
+    hists = [c.get("hist") or [] for c in cands]
+    for i, c in enumerate(cands):
+        if not hists[i]:
+            continue
+        ranked = sorted((hist_similarity(hists[i], hists[j]), cands[j]["id"])
+                        for j in range(len(cands)) if j != i and hists[j])
+        c["hist_top"] = [(oid, score) for score, oid in ranked[-top_k:][::-1]]
     return cands
 
 
@@ -586,13 +616,15 @@ def select_prompt_cands(cands, tap_id, cap):
 
 
 def prompt_table(cands, tap_id, cap=None):
-    """All holds as compact text: color features, groups, spatial neighbors and embed hints.
+    """All holds as compact text: color features, groups, spatial neighbors, embed and hist hints.
 
     With a cap, only the most relevant rows are shown (see select_prompt_cands); the full color
     group listing still names every id, so the whole set stays countable and answerable."""
     shown = select_prompt_cands(cands, tap_id, cap)
     show_embed = any(c.get("embed_top") for c in cands)
-    rows = ["id | color | hue sat val | L a b | group | x y size | near" + (" | embed" if show_embed else "")]
+    show_hist = any(c.get("hist_top") for c in cands)
+    rows = ["id | color | hue sat val | L a b | group | x y size | near"
+            + (" | embed" if show_embed else "") + (" | hist" if show_hist else "")]
     for c in shown:
         h, s, v = c["hsv"]
         lab = " ".join(str(v) for v in c["lab"])
@@ -602,6 +634,8 @@ def prompt_table(cands, tap_id, cap=None):
                f"{','.join(map(str, c['near']))}")
         if show_embed:
             row += f" | {','.join(f'{i}:{s:.2f}' for i, s in c.get('embed_top') or [])}"
+        if show_hist:
+            row += f" | {','.join(f'{i}:{s:.2f}' for i, s in c.get('hist_top') or [])}"
         rows.append(row)
     if len(shown) < len(cands):
         rows.append(f"Showing {len(shown)} of {len(cands)} holds "
@@ -615,6 +649,10 @@ def prompt_table(cands, tap_id, cap=None):
     if show_embed:
         table += ("Embed lists the visually most similar holds per row as id:score "
                   "(higher is more similar); use it as a hint with color and position.\n")
+    if show_hist:
+        table += ("Hist lists the holds whose color distribution best matches each row "
+                  "as id:score (higher is more similar); same-route holds usually rank "
+                  "each other high even across shadow and glare.\n")
     return (table + f"The user tapped hold {tap_id} (marked {tap_id}*). Return ONLY the holds of the tapped "
             f"hold's route as JSON.")
 
@@ -793,14 +831,17 @@ def verify_once(spark, img, cands, tap_id, ids):
 
 def find_with(sam, spark, jpeg, point, on_trace=None, clock=time.monotonic,
               prompt="", embedder=None, use_embed=None, use_verify=None,
-              use_shortlist=None, shortlist_cap=None):
+              use_shortlist=None, shortlist_cap=None, use_hist=None):
     """(JPEG, point → holds) with injected SAM and Spark. Trace steps: (sam), (color), (spark), (post),
-    plus (embed), (shortlist) and (verify) when those passes are enabled.
+    plus (embed), (hist), (shortlist) and (verify) when those passes are enabled.
 
     prompt selects the single-pass system prompt variant (v1, v2 or v3; default v1).
     use_embed adds DINOv2 similarity hints (an extra (embed) trace step); None reads
     META3_EMBED from the environment (default off). embedder is injectable for tests
     (crops → vectors); embedding failures never break the pipeline, they skip the hints.
+    use_hist adds HS-histogram similarity hints (an extra (hist) trace step); None reads
+    META3_HIST from the environment (default off). Histograms need no model, so the hints
+    never fail.
     use_verify adds a drop-only second Spark call over close-up tiles of the answer
     (an extra (verify) trace step with its own tokens); None reads META3_VERIFY from
     the environment (default off, exactly one Spark call with unchanged prompts).
@@ -857,6 +898,13 @@ def find_with(sam, spark, jpeg, point, on_trace=None, clock=time.monotonic,
             log.warning("route pipeline: embeddings failed (%s: %s)", type(err).__name__, str(err)[:300])
             for c in spark_cands:
                 c["embed_top"] = []
+    if use_hist if use_hist is not None else hist_enabled():
+        started = clock()
+        add_hist_similar(spark_cands)
+        if any(c.get("hist_top") for c in spark_cands):
+            trace.append({"tool": "(hist)",
+                          "args": {"hints": sum(len(c.get("hist_top") or []) for c in spark_cands)},
+                          "ms": round((clock() - started) * 1000)})
     started = clock()
     ids, info = run_once(spark, img, spark_cands, tap_id, prompt=prompt, fallback_cands=cands)
     step = {"tool": "(spark)", "args": {"count": len(ids), "spark_calls": 1, "prompt": info["prompt"]},
@@ -898,6 +946,7 @@ def route_finder(env, on_trace=None, embedder=None):
     call as find(jpeg, point, on_trace=...), to receive the per-stage steps.
     META3_PROMPT in env selects the single-pass system prompt variant (v1, v2 or v3).
     META3_EMBED=1 in env adds DINOv2 similarity hints (torch stays optional);
+    META3_HIST=1 in env adds HS-histogram similarity hints (no model needed);
     META3_VERIFY=1 in env adds the drop-only second Spark call over close-up tiles.
     META3_SHORTLIST=1 in env shortlists candidates before Spark (cap META3_SHORTLIST_MAX,
     default 24; the ranker degrades to color plus spatial chains without torch).
@@ -910,6 +959,7 @@ def route_finder(env, on_trace=None, embedder=None):
                         env.get("META_AGENT_EFFORT", agent_mod.EFFORT))
     prompt = env.get("META3_PROMPT", "")
     use_embed = embed_enabled(env)
+    use_hist = hist_enabled(env)
     use_verify = verify_enabled(env)
     use_shortlist = shortlist_enabled(env)
     cap = shortlist_max(env)
@@ -917,7 +967,7 @@ def route_finder(env, on_trace=None, embedder=None):
     def find(jpeg, point, on_trace=on_trace):
         return find_with(sam, spark, jpeg, point, on_trace, prompt=prompt,
                          embedder=embedder, use_embed=use_embed, use_verify=use_verify,
-                         use_shortlist=use_shortlist, shortlist_cap=cap)
+                         use_shortlist=use_shortlist, shortlist_cap=cap, use_hist=use_hist)
     return find
 
 
@@ -942,6 +992,7 @@ def yolo_finder(env, on_trace=None, embedder=None):
                         env.get("META_AGENT_EFFORT", agent_mod.EFFORT))
     prompt = env.get("META3_PROMPT", "")
     use_embed = embed_enabled(env)
+    use_hist = hist_enabled(env)
     use_verify = verify_enabled(env)
     use_shortlist = shortlist_enabled(env)
     cap = shortlist_max(env)
@@ -949,7 +1000,7 @@ def yolo_finder(env, on_trace=None, embedder=None):
     def find(jpeg, point, on_trace=on_trace):
         return find_with(sam, spark, jpeg, point, on_trace, prompt=prompt,
                          embedder=embedder, use_embed=use_embed, use_verify=use_verify,
-                         use_shortlist=use_shortlist, shortlist_cap=cap)
+                         use_shortlist=use_shortlist, shortlist_cap=cap, use_hist=use_hist)
     return find
 
 

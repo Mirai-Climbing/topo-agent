@@ -398,6 +398,7 @@ class EmbedTest(unittest.TestCase):
         self.assertEqual([s["tool"] for s in trace], ["(sam)", "(color)", "(embed)", "(spark)", "(post)"])
         self.assertIn("| embed", spark.seen[0][1]["content"][0]["text"])
 
+
     def test_find_with_embed_off_by_default(self):
         holds, trace, spark = self.find()
         self.assertEqual(len(holds), 2)
@@ -420,6 +421,55 @@ class EmbedTest(unittest.TestCase):
 
         with self.assertRaises(ImportError):
             pipeline.add_embed_similar(wall(), candidates(), embedder=broken)
+
+
+class HistHintTest(unittest.TestCase):
+    def test_hist_top_ranks_same_color_first(self):
+        cands = pipeline.add_hist_similar(candidates(), top_k=2)
+        self.assertEqual([i for i, _ in cands[0]["hist_top"]], [1, 2])  # the other red first
+        self.assertGreater(cands[0]["hist_top"][0][1], 0.7)
+        self.assertEqual(len(cands[1]["hist_top"]), 2)
+
+    def test_hist_top_skips_missing_hists(self):
+        cands = candidates()
+        cands[1].pop("hist")
+        cands = pipeline.add_hist_similar(cands, top_k=2)
+        self.assertEqual(cands[1]["hist_top"], [])
+        self.assertEqual([i for i, _ in cands[0]["hist_top"]], [2])  # only blue left to rank
+
+    def test_prompt_table_shows_hist_only_when_present(self):
+        cands = pipeline.add_neighbors(pipeline.group_by_color(candidates()), W, H)
+        self.assertNotIn("hist", pipeline.prompt_table(cands, 0))  # default off: no column
+        pipeline.add_hist_similar(cands, top_k=1)
+        table = pipeline.prompt_table(cands, 0)
+        self.assertIn("| hist", table)
+        self.assertIn("Hist lists the holds whose color distribution", table)
+
+    def test_hist_enabled_defaults_off(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(pipeline.hist_enabled())
+            self.assertFalse(pipeline.hist_enabled({}))
+            self.assertTrue(pipeline.hist_enabled({"META3_HIST": "1"}))
+        with mock.patch.dict(os.environ, {"META3_HIST": "1"}):
+            self.assertTrue(pipeline.hist_enabled())
+            self.assertFalse(pipeline.hist_enabled({"META3_HIST": "0"}))  # explicit env wins
+
+    def test_find_with_hist_adds_trace_and_table_signal(self):
+        jpeg = jpeg_of(wall())
+        tap = {"x": 230 / W, "y": 225 / H}
+
+        def post(body):
+            return {"output_text": "<0f>" + ",".join(record(i, box) for i, (box, _) in enumerate(HOLDS))}
+
+        spark = RunOnceTest().route_reply()
+        traces = []
+        with mock.patch.dict(os.environ, {}, clear=True):
+            holds = pipeline.find_with(sam.Sam(post), spark, jpeg, tap,
+                                       on_trace=traces.append, use_hist=True)
+        self.assertEqual(len(holds), 2)
+        self.assertEqual([s["tool"] for s in traces[0]],
+                         ["(sam)", "(color)", "(hist)", "(spark)", "(post)"])
+        self.assertIn("| hist", spark.seen[0][1]["content"][0]["text"])
 
 
 FLAGS = ["TOPO_SKIP_COVERED_POINT", "TOPO_PRUNE_PROMPT", "TOPO_PROMPT_MAX",
