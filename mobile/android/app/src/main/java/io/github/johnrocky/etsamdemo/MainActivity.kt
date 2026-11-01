@@ -433,7 +433,9 @@ class MainActivity : AppCompatActivity() {
         val annotated = SparkRoute.jpegBytes(SparkRoute.annotate(snapPhoto, snapDets, tapId))
         val closeUp = SparkRoute.jpegBytes(SparkRoute.closeUp(snapPhoto, snapDets[tapId], tapId))
         val start = System.nanoTime()
-        val text = SparkRoute.askSpark(key, SparkRoute.requestBody(table, small, annotated, closeUp))
+        val body = SparkRoute.requestBody(table, small, annotated, closeUp)
+        Log.i(TAG, "spark upload %.0f KB".format(body.length / 1024.0))
+        val text = SparkRoute.askSpark(key, body)
         val ms = (System.nanoTime() - start) / 1e6
         val ans = SparkRoute.parseAnswer(text, snapDets.indices.toSet(), tapId)
         runOnUiThread {

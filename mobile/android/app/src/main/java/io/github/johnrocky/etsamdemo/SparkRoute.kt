@@ -29,8 +29,8 @@ object SparkRoute {
   const val MODEL = "muse-spark-1.3"
   const val EFFORT = "low"
   const val TEMP = 0.2
-  const val AI_SIDE = 1280
-  const val JPEG_QUALITY = 85
+  const val AI_SIDE = 960
+  const val JPEG_QUALITY = 70
   const val SIMILAR = 0.12
   const val LINK = 0.3f
   const val MAX_HOLDS = 60
