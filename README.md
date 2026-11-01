@@ -7,23 +7,29 @@ Snap a photo of the wall and tap one hold. **SAM 3.1** outlines every hold, then
 to inspect, compare and zoom in, and picks only the holds that belong to the same problem.
 The resulting topo becomes a problem that climbers can share in [Mirai Climbing](https://mirai-climbing.com/), a climbing app.
 
-![What most climbers see, the same wall with red-green color blindness (simulated), and the problem outlined by the topo agent](docs/images/colorblind.png)
-
 ## Why we built it
 
-**In a bouldering gym, a problem is its color.** All holds of one problem share a color (or a piece of tape), and
-that is how climbers know which holds they may use. But color vision deficiency is common: red-green types affect up
-to about 8% of men of Northern European descent and about 4–6.5% of Japanese and Chinese men
-([review](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12385717/)), roughly one man in twenty in Japan.
-So any busy gym has climbers for whom red and orange, or red and green, look nearly the same, and who have to ask
-someone which holds belong to a problem.
+**A climbing app needs every problem added first.** Apps for gym climbers let you find a gym's problems, log your
+sends and share them. But before any of that, someone has to make a topo for each problem: a photo of the wall with
+its holds marked. Marking every hold by hand takes time, and gyms reset their walls again and again, so keeping up is
+hard.
 
-The topo agent does the color work for them. Tap one hold, and the whole problem is outlined, so the problem is
-visible without telling colors apart. The same topo is then shared with other climbers in the app, so nobody has to
-mark the same problem twice.
+We want adding a problem to take one tap, so any climber at any gym can do it. Tap one hold, and the topo agent
+outlines the whole problem; the climber checks it, fixes a hold if needed, and saves it as a shared problem in the app.
+Nobody has to mark the same problem twice.
 
 Mirai Climbing started as a way to find climbing partners. Partner finding alone is a small market, so we moved to
 topos: something every climber uses every session, and a shared problem is a natural way for climbers to meet.
+
+### It also helps climbers who can't tell colors apart
+
+![What most climbers see, the same wall with red-green color blindness (simulated), and the problem outlined by the topo agent](docs/images/colorblind.png)
+
+All holds of one problem share a color (or a piece of tape), and that is how climbers know which holds they may use.
+But color vision deficiency is common: red-green types affect up to about 8% of men of Northern European descent and
+about 4–6.5% of Japanese and Chinese men ([review](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12385717/)), roughly
+one man in twenty in Japan. Because the topo agent outlines the problem instead of relying on color, the problem is
+visible without telling colors apart.
 
 ## Why an agent?
 
