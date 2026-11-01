@@ -711,7 +711,7 @@ def run_once(spark, img, cands, tap_id, prompt="", fallback_cands=None):
     content = [{"type": "text", "text": prompt_table(cands, tap_id, prompt_cap())},
                agent_mod._image_part(agent_mod._jpeg(small)),
                agent_mod._image_part(agent_mod._jpeg(agent_mod.annotate(img, cands, tap_id)))]
-    if close_up:
+    if close_up and not agent_mod._flag("TOPO_NO_CLOSEUP"):
         content.append(agent_mod._image_part(close_up))
     messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
     try:

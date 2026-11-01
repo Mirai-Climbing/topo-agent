@@ -180,6 +180,14 @@ class RunOnceTest(unittest.TestCase):
         self.assertEqual(ids, [0, 1])  # clean_ids puts the tapped hold first
         self.assertEqual(info["fallback"], "")
 
+    def test_no_closeup_flag_drops_the_fourth_part(self):
+        cands = pipeline.add_neighbors(pipeline.group_by_color(candidates()), W, H)
+        spark = self.route_reply()
+        with mock.patch.dict(os.environ, {"TOPO_NO_CLOSEUP": "1"}):
+            pipeline.run_once(spark, wall(), cands, 0)
+        user = spark.seen[0][1]["content"]
+        self.assertEqual(len(user), 3)  # table text + photo + numbered candidates
+
 
 class FinderTest(unittest.TestCase):
     def test_find_with_reports_stages(self):
