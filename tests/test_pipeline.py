@@ -77,6 +77,34 @@ class ColorTest(unittest.TestCase):
         self.assertIn(1, cands[0]["near"])  # same-group holds near each other
         self.assertNotIn(2, cands[0]["near"])  # other groups are never neighbors
 
+    def test_hist_basics(self):
+        flat = [1.0 / 256] * 256
+        self.assertAlmostEqual(pipeline.hist_similarity(flat, flat), 1.0)
+        disjoint = [0.0] * 256
+        disjoint[0], flat2 = 1.0, [0.0] * 256
+        flat2[255] = 1.0
+        self.assertAlmostEqual(pipeline.hist_similarity(disjoint, flat2), 0.0)
+        self.assertEqual(pipeline.hist_similarity([], flat), 0.0)
+
+    def test_classify_sets_hist(self):
+        for c in candidates():
+            self.assertEqual(len(c["hist"]), 256)
+            self.assertAlmostEqual(sum(c["hist"]), 1.0, delta=0.01)
+
+    def test_highlight_shares_hist(self):
+        red, red_plain, blue = candidates()
+        same = pipeline.hist_similarity(red["hist"], red_plain["hist"])
+        other = pipeline.hist_similarity(red["hist"], blue["hist"])
+        self.assertGreater(same, 0.7)  # the spot covers a quarter of the hold yet red still matches
+        self.assertLess(other, 0.5)  # red and blue barely overlap
+
+    def test_closeness_prefers_hist(self):
+        far_red, far_blue = (0.0, 0.9, 0.8), (0.6, 0.9, 0.8)
+        same = [1.0 / 256] * 256
+        self.assertAlmostEqual(pipeline.color_closeness(far_red, far_blue, same, same), 1.0)
+        self.assertAlmostEqual(pipeline.color_sim(far_red, far_blue, same, same), 1.0)
+        self.assertLess(pipeline.color_closeness(far_red, far_blue), 0.2)  # hsv fallback
+
 
 class ParseTest(unittest.TestCase):
     def test_valid(self):
@@ -850,7 +878,8 @@ class ShortlistTest(unittest.TestCase):
         sims = pipeline.tap_similarities(wall(), cands, 0, embedder=no_torch)
         for c in cands:  # pure color closeness, offline
             self.assertAlmostEqual(sims[c["id"]],
-                                   pipeline.color_closeness(c["hsv"], cands[0]["hsv"]))
+                                   pipeline.color_closeness(c["hsv"], cands[0]["hsv"],
+                                                            c["hist"], cands[0]["hist"]))
         self.assertGreater(sims[1], sims[2])  # the same-color hold still outranks blue
         kept = pipeline.shortlist_candidates(cands, 0, sims, cap=2)
         self.assertEqual([c["id"] for c in kept], [0, 1])
@@ -961,7 +990,8 @@ class RankTest(unittest.TestCase):
         scores = pipeline.rank_scores(cands, 0, cos)
         self.assertEqual(scores[0], 1.0)  # the tap's self-score
         for i in (1, 2):
-            expected = pipeline.color_sim(cands[i]["hsv"], cands[0]["hsv"]) * (0.5 + 0.5 * cos[i])
+            expected = pipeline.color_sim(cands[i]["hsv"], cands[0]["hsv"],
+                                              cands[i]["hist"], cands[0]["hist"]) * (0.5 + 0.5 * cos[i])
             self.assertAlmostEqual(scores[i], expected)
         self.assertGreater(scores[1], scores[2])  # same color and closer embedding wins
 
@@ -969,7 +999,8 @@ class RankTest(unittest.TestCase):
         cands = candidates()
         scores = pipeline.rank_scores(cands, 0)
         for c in cands:
-            self.assertAlmostEqual(scores[c["id"]], pipeline.color_sim(c["hsv"], cands[0]["hsv"]))
+            self.assertAlmostEqual(scores[c["id"]], pipeline.color_sim(c["hsv"], cands[0]["hsv"],
+                                                                         c["hist"], cands[0]["hist"]))
 
     def test_rank_cosines_to_tap_from_fake_vectors(self):
         cos = pipeline.rank_cosines(wall(), candidates(), 0, embedder=fake_embedder)
