@@ -2,10 +2,10 @@
 
 Draft of the hackathon submission form, for the team to review. Comment on the PR or suggest edits.
 Numbers are updated on Nov 4 from the final 68-route rerun; the video and X links are added when they exist.
-The reviewer password is never written here or in public fields; we ask the organizers how to hand reviewer access to the judges.
+No passwords, emails or keys go here or in the form. The organizers said there is no private field: judges try the project from the public repo (README "Try it (for judges)") and the video.
 
 提出フォームの下書き。チームで見て、PR にコメントするか、直しを提案してください。
-数字は 11/4 に最終の測り直しで直す。動画と X の URL は、できてから入れる。審査用のパスワードは、ここにも公開される欄にも書かない。審査員への渡し方は主催者に聞く。
+数字は 11/4 に最終の測り直しで直す。動画と X の URL は、できてから入れる。パスワード、メール、鍵は、ここにもフォームにも書かない。主催者の答え:非公開の欄はない。審査員は公開リポジトリ(README の「Try it (for judges)」)と動画で試す。
 
 ## Choices (proposed)
 
@@ -16,7 +16,7 @@ The reviewer password is never written here or in public fields; we ask the orga
 | Track | Indie Developer Track | Startups Track only if Mirai Climbing is run as a company (Yuzuki to confirm) |
 | Problem statement | Build for Your World | Built for climbers in our own gyms: anyone can add a problem with one tap, at any gym |
 | Most Viral Track | X post link, once posted | |
-| Reviewer access | Ask the organizers | The judges need the reviewer account for the production app; the password goes only where the organizers say, never in a public field |
+| How judges try it | README "Try it (for judges)" | No login: replay recorded runs without a key, or run live with a Meta Model API key. The production app needs a login, so the video shows it |
 | Partner technologies feedback | (blank) | We didn't use Fireworks, Modal or Baseten |
 
 ## Project Description
@@ -45,7 +45,8 @@ https://github.com/Mirai-Climbing/topo-agent
 - **Muse Spark 1.3** (Chat Completions with tool calling, `reasoning_effort: low`): an agent that gets the photo, an image with every candidate numbered, a close-up of the tapped hold, and a candidate table. It chooses its own tools: `inspect_candidates`, `find_similar`, `look_closer` (zoomed crops as images, to spot tape) and `submit_holds` (the answer, with a one-sentence reason).
 - Guardrails: limits on turns, tool calls and holds; text in the photo is ignored; only the photo and the tap are sent, never user data. If Muse Spark fails, the app falls back to SAM 3.1 plus a color filter.
 - Each step is traced and shown in the app as "What the AI did".
-- It runs in production in the Mirai Climbing app (https://api.mirai-climbing.com/app/) for the hackathon reviewer account.
+- Try it from the repo without any login: `python -m topo_agent.demo` replays a recorded run on a sample wall, and `--live` runs SAM 3.1 + Muse Spark with your own key (README "Try it (for judges)").
+- It also runs in production in the Mirai Climbing app (login required; shown in the video).
 
 ## Why are Meta's models important to your solution?
 
