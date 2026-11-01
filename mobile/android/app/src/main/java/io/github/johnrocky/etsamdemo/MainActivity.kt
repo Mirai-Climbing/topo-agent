@@ -20,6 +20,7 @@ import androidx.core.content.FileProvider
 import java.io.File
 import kotlin.concurrent.thread
 import kotlin.math.exp
+import kotlin.math.sqrt
 import org.pytorch.executorch.EValue
 import org.pytorch.executorch.Module
 import org.pytorch.executorch.Tensor
@@ -39,6 +40,11 @@ private const val NMS_THRESH = 0.5f
 private const val MAX_DETS = 100
 /** Detection and overlay run on this; the phone screen cannot show more anyway. */
 private const val MAX_SIDE = 1400
+/** Hue/saturation bins of the per-hold color histogram used for route grouping. */
+private const val HIST_H = 16
+private const val HIST_S = 16
+/** Holds at least this similar (Bhattacharyya) to the tapped hold count as its route. */
+private const val ROUTE_SIM = 0.6f
 
 private data class Det(
     val x1: Float,
@@ -51,8 +57,9 @@ private data class Det(
 
 /**
  * One-shot climbing-hold detector. A YOLO11n-seg model trained on the Kaggle hold dataset runs
- * once per photo; every hold mask is drawn immediately. Tapping a hold only selects it for
- * inspection (index + confidence in the status line) -- detection needs no tap at all.
+ * once per photo; every hold mask is drawn immediately. Tapping a hold groups its route offline:
+ * holds whose mask-interior HS histogram matches the tapped hold stay bright, the rest dim.
+ * Tapping the wall clears the route.
  *
  * Model contract (ExecuTorch export of the ultralytics seg head):
  * - input [1,3,640,640] letterboxed RGB / 255, pad value 114
@@ -67,6 +74,8 @@ class MainActivity : AppCompatActivity() {
   private var hasPhoto = false
   private var dets: List<Det> = emptyList()
   private var selected = -1
+  private var hists: List<FloatArray> = emptyList()
+  private var route: Set<Int> = emptySet()
   private var captureFile = File("")
   @Volatile private var busy = true
 
@@ -282,6 +291,8 @@ class MainActivity : AppCompatActivity() {
     }
     dets = nms(cands)
     selected = -1
+    route = emptySet()
+    hists = colorHists()
     Log.i(TAG, "yolo: ${dets.size} holds after NMS (${cands.size} candidates), infer ${inferMs}ms")
     render()
     setStatus(
@@ -302,7 +313,10 @@ class MainActivity : AppCompatActivity() {
     }
   }
 
-  /** Tint every mask; the selected hold (if any) is drawn last and brighter. */
+  /**
+   * Tint every mask. With no selection all masks share one alpha; once a hold is tapped the
+   * tapped hold is brightest, its route stays visible, and the rest dim nearly away.
+   */
   private fun render() {
     val start = System.nanoTime()
     val w = photo.width
@@ -317,63 +331,21 @@ class MainActivity : AppCompatActivity() {
     for (idx in order) {
       val d = dets[idx]
       val color = palette(idx)
-      val bright = idx == selected
-      val alpha = if (bright) 0.75f else 0.45f
+      val alpha =
+          when {
+            idx == selected -> 0.8f
+            selected < 0 -> 0.45f
+            idx in route -> 0.55f
+            else -> 0.10f
+          }
       val cr = (color shr 16 and 0xFF) * alpha
       val cg = (color shr 8 and 0xFF) * alpha
       val cb = (color and 0xFF) * alpha
-      // Sigmoid mask at proto resolution over the box region (plus a 1-cell margin),
-      // then bilinear-upsampled to photo pixels: smooth edges instead of 160-grid blocks.
-      val gx0 = (d.x1 * scale + padX) / 4
-      val gy0 = (d.y1 * scale + padY) / 4
-      val gx1 = (d.x2 * scale + padX) / 4
-      val gy1 = (d.y2 * scale + padY) / 4
-      val ix0 = (gx0.toInt() - 1).coerceIn(0, PROTO - 1)
-      val iy0 = (gy0.toInt() - 1).coerceIn(0, PROTO - 1)
-      val ix1 = (gx1.toInt() + 1).coerceIn(0, PROTO - 1)
-      val iy1 = (gy1.toInt() + 1).coerceIn(0, PROTO - 1)
-      val mw = ix1 - ix0 + 1
-      val mh = iy1 - iy0 + 1
-      val small = FloatArray(mw * mh)
-      for (cy in 0 until mh) {
-        for (cx in 0 until mw) {
-          val p = (iy0 + cy) * PROTO + (ix0 + cx)
-          var v = 0f
-          for (k in 0 until COEFS) v += d.coefs[k] * protoAt(k, p)
-          small[cy * mw + cx] = 1f / (1f + exp(-v))
-        }
-      }
-      val bx0 = d.x1.toInt().coerceIn(0, w - 1)
-      val by0 = d.y1.toInt().coerceIn(0, h - 1)
-      val bx1 = d.x2.toInt().coerceIn(0, w)
-      val by1 = d.y2.toInt().coerceIn(0, h)
-      val bw = bx1 - bx0
-      val bh = by1 - by0
-      if (bw <= 0 || bh <= 0) continue
-      // Binary mask at photo resolution over the box.
-      val bin = BooleanArray(bw * bh)
-      for (y in 0 until bh) {
-        val fy = ((by0 + y + 0.5f) * scale + padY) / 4 - iy0
-        val y0 = fy.toInt().coerceIn(0, mh - 1)
-        val y1 = (y0 + 1).coerceIn(0, mh - 1)
-        val wy = (fy - fy.toInt()).coerceIn(0f, 1f)
-        for (x in 0 until bw) {
-          val fx = ((bx0 + x + 0.5f) * scale + padX) / 4 - ix0
-          val x0 = fx.toInt().coerceIn(0, mw - 1)
-          val x1 = (x0 + 1).coerceIn(0, mw - 1)
-          val wx = (fx - fx.toInt()).coerceIn(0f, 1f)
-          val v =
-              small[y0 * mw + x0] * (1 - wx) * (1 - wy) +
-                  small[y0 * mw + x1] * wx * (1 - wy) +
-                  small[y1 * mw + x0] * (1 - wx) * wy +
-                  small[y1 * mw + x1] * wx * wy
-          bin[y * bw + x] = v > 0.5f
-        }
-      }
-      for (y in 0 until bh) {
-        for (x in 0 until bw) {
-          if (!bin[y * bw + x]) continue
-          val o = (by0 + y) * w + (bx0 + x)
+      val m = holdMask(d, w, h, scale, padX, padY) ?: continue
+      for (y in 0 until m.bh) {
+        for (x in 0 until m.bw) {
+          if (!m.bin[y * m.bw + x]) continue
+          val o = (m.by0 + y) * w + (m.bx0 + x)
           val c = base[o]
           out[o] =
               Color.rgb(
@@ -393,6 +365,116 @@ class MainActivity : AppCompatActivity() {
   private var protoCache: FloatArray = FloatArray(0)
 
   private fun protoAt(ch: Int, p: Int): Float = protoCache[ch * PROTO * PROTO + p]
+
+  private data class MaskBox(
+      val bx0: Int,
+      val by0: Int,
+      val bw: Int,
+      val bh: Int,
+      val bin: BooleanArray,
+  )
+
+  /** Binary hold mask at photo resolution over the detection box, or null for empty boxes. */
+  private fun holdMask(d: Det, w: Int, h: Int, scale: Float, padX: Float, padY: Float): MaskBox? {
+    // Sigmoid mask at proto resolution over the box region (plus a 1-cell margin),
+    // then bilinear-upsampled to photo pixels: smooth edges instead of 160-grid blocks.
+    val gx0 = (d.x1 * scale + padX) / 4
+    val gy0 = (d.y1 * scale + padY) / 4
+    val gx1 = (d.x2 * scale + padX) / 4
+    val gy1 = (d.y2 * scale + padY) / 4
+    val ix0 = (gx0.toInt() - 1).coerceIn(0, PROTO - 1)
+    val iy0 = (gy0.toInt() - 1).coerceIn(0, PROTO - 1)
+    val ix1 = (gx1.toInt() + 1).coerceIn(0, PROTO - 1)
+    val iy1 = (gy1.toInt() + 1).coerceIn(0, PROTO - 1)
+    val mw = ix1 - ix0 + 1
+    val mh = iy1 - iy0 + 1
+    val small = FloatArray(mw * mh)
+    for (cy in 0 until mh) {
+      for (cx in 0 until mw) {
+        val p = (iy0 + cy) * PROTO + (ix0 + cx)
+        var v = 0f
+        for (k in 0 until COEFS) v += d.coefs[k] * protoAt(k, p)
+        small[cy * mw + cx] = 1f / (1f + exp(-v))
+      }
+    }
+    val bx0 = d.x1.toInt().coerceIn(0, w - 1)
+    val by0 = d.y1.toInt().coerceIn(0, h - 1)
+    val bx1 = d.x2.toInt().coerceIn(0, w)
+    val by1 = d.y2.toInt().coerceIn(0, h)
+    val bw = bx1 - bx0
+    val bh = by1 - by0
+    if (bw <= 0 || bh <= 0) return null
+    // Binary mask at photo resolution over the box.
+    val bin = BooleanArray(bw * bh)
+    for (y in 0 until bh) {
+      val fy = ((by0 + y + 0.5f) * scale + padY) / 4 - iy0
+      val y0 = fy.toInt().coerceIn(0, mh - 1)
+      val y1 = (y0 + 1).coerceIn(0, mh - 1)
+      val wy = (fy - fy.toInt()).coerceIn(0f, 1f)
+      for (x in 0 until bw) {
+        val fx = ((bx0 + x + 0.5f) * scale + padX) / 4 - ix0
+        val x0 = fx.toInt().coerceIn(0, mw - 1)
+        val x1 = (x0 + 1).coerceIn(0, mw - 1)
+        val wx = (fx - fx.toInt()).coerceIn(0f, 1f)
+        val v =
+            small[y0 * mw + x0] * (1 - wx) * (1 - wy) +
+                small[y0 * mw + x1] * wx * (1 - wy) +
+                small[y1 * mw + x0] * (1 - wx) * wy +
+                small[y1 * mw + x1] * wx * wy
+        bin[y * bw + x] = v > 0.5f
+      }
+    }
+    return MaskBox(bx0, by0, bw, bh, bin)
+  }
+
+  /** Normalized 16x16 HS histogram over mask-interior photo pixels (stride 2 for speed). */
+  private fun holdHist(
+      d: Det,
+      base: IntArray,
+      w: Int,
+      h: Int,
+      scale: Float,
+      padX: Float,
+      padY: Float,
+  ): FloatArray {
+    val hist = FloatArray(HIST_H * HIST_S)
+    val m = holdMask(d, w, h, scale, padX, padY) ?: return hist
+    val hsv = FloatArray(3)
+    var n = 0
+    for (y in 0 until m.bh step 2) {
+      for (x in 0 until m.bw step 2) {
+        if (!m.bin[y * m.bw + x]) continue
+        Color.colorToHSV(base[(m.by0 + y) * w + (m.bx0 + x)], hsv)
+        val hi = (hsv[0] / 360f * HIST_H).toInt().coerceIn(0, HIST_H - 1)
+        val si = (hsv[1] * HIST_S).toInt().coerceIn(0, HIST_S - 1)
+        hist[hi * HIST_S + si] += 1f
+        n++
+      }
+    }
+    if (n > 0) for (i in hist.indices) hist[i] /= n
+    return hist
+  }
+
+  private fun colorHists(): List<FloatArray> {
+    val start = System.nanoTime()
+    val w = photo.width
+    val h = photo.height
+    val base = IntArray(w * h)
+    photo.getPixels(base, 0, w, 0, 0, w, h)
+    val scale = SIDE / maxOf(w, h).toFloat()
+    val padX = (SIDE - w * scale) / 2f
+    val padY = (SIDE - h * scale) / 2f
+    val out = dets.map { holdHist(it, base, w, h, scale, padX, padY) }
+    Log.i(TAG, "hist %.0f ms for %d holds".format((System.nanoTime() - start) / 1e6, out.size))
+    return out
+  }
+
+  /** Bhattacharyya coefficient of two normalized histograms (1 = same distribution). */
+  private fun histSim(a: FloatArray, b: FloatArray): Float {
+    var s = 0f
+    for (i in a.indices) s += sqrt(a[i] * b[i])
+    return s.coerceIn(0f, 1f)
+  }
 
   private fun palette(i: Int): Int {
     val colors =
@@ -417,12 +499,24 @@ class MainActivity : AppCompatActivity() {
         }
       }
     }
-    if (best < 0) return
+    if (best < 0) { // tapping the wall clears the route
+      if (selected >= 0) {
+        selected = -1
+        route = emptySet()
+        render()
+        setStatus("%d holds · tap a hold".format(dets.size))
+      }
+      return
+    }
     selected = best
+    route =
+        if (hists.size == dets.size)
+            dets.indices.filter { histSim(hists[best], hists[it]) >= ROUTE_SIM }.toSet()
+        else setOf(best)
     val d = dets[best]
     render()
-    setStatus("hold #%d · conf %.2f · %d holds total".format(best, d.conf, dets.size))
-    Log.i(TAG, "tap ($x, $y) -> hold #$best conf ${d.conf}")
+    setStatus("hold #%d · route %d/%d holds · conf %.2f".format(best, route.size, dets.size, d.conf))
+    Log.i(TAG, "tap ($x, $y) -> hold #$best route ${route.size}")
   }
 
   private fun buildUi() {

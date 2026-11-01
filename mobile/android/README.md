@@ -9,7 +9,8 @@ No network, no API calls.
 - Sample photo (`gym.jpg` asset, optional) detected at launch
 - Camera capture with EXIF rotation handling
 - Gallery pick (system photo picker, no permission needed)
-- Tap a hold to inspect (index + confidence)
+- Tap a hold to group its route offline (HS-histogram match ≥ 0.6 stays
+  bright, the rest dim; tap the wall to clear, index + route size in status)
 - Before/after toggle
 
 ## Build

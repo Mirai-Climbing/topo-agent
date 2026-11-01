@@ -6,7 +6,8 @@ thin native apps. No network, no API calls.
 ## Layout
 
 - `android/` — verified app (Galaxy S23): sample photo, camera capture,
-  tap-to-inspect, before/after toggle. See its README.
+  tap-to-group-the-route (offline HS-histogram matching), before/after toggle.
+  See its README.
 - `ios/` — SwiftUI scaffold porting the same pipeline (needs an Xcode build;
   see its README).
 - `assets/hold_yolo.pte` — 40 MB model (YOLO11s-seg, ExecuTorch 0.6 format),
