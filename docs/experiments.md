@@ -266,6 +266,276 @@ Rejected: `TOPO_AI_SIDE=960` on the winner (`out/three-stage-v4/`): recall fell
 96% / 5.9 s (was 99%/96%/5.1 s), no regression.
 
 <!-- topo-agent-mcp:begin -->
+## E16: Full 68-route bench + leaderboard submission (2026-10-30, Siho)
+
+All 68 Kaggle routes, one run each, same session. Server rescored identically
+(local holds submitted as x/y/r circles). Outputs `out/bench68/`, leaderboard
+runs as siho9o9o (meta d3d6a169, meta3 7f1d69ed, meta3-winner 6505b7da).
+
+| Method | Recall | Precision | F1 | Mean s | Hits/found/truth |
+|---|---|---|---|---|---|
+| meta (ReAct, 6 turns) | 60% | 68% | 0.639 | 30.9 | 353/517/587 |
+| meta3 (single-pass v1) | 54% | 46% | 0.501 | 12.7 | 319/687/587 |
+| meta3-winner (v3+embed+fast) | 57% | 57% | 0.569 | 16.1 | 334/587/587 |
+
+8-case subset overstated the gaps: full-set meta precision is 68% (was 85%),
+winner precision 57% (was 75%). Winner still leads meta3 everywhere and halves
+meta's time at -3pp recall / -11pp precision.
+
+## E17: Three improvement experiments on 68 routes (2026-10-30, Siho)
+
+Built by 3 parallel subagents on `feat/three-stage` (110 tests green), one run
+each, outputs `out/bench68x/`, leaderboard runs as siho9o9o.
+
+| Method | Recall | Precision | F1 | Mean s | Hits/found |
+|---|---|---|---|---|---|
+| exp-verify (2nd drop-only call) | 50% | 65% | 0.568 | 23.3 | 295/451 |
+| exp-shortlist (embed shortlist 24) | 54% | 55% | 0.545 | 15.9 | 319/583 |
+| exp-rank (no-LLM hybrid) | 61% | 24% | 0.349 | 5.6 | 360/1478 |
+
+Reference: meta3-winner 57%/57%/16.1 (F1 0.569), meta 60%/68%/30.9 (F1 0.639).
+Verify ties the winner on F1 but slower; shortlist loses recall (pruning cuts
+true holds); ranker has the best recall of any method at 5.6 s with zero Spark
+calls, but precision 24% (nearly 1500 found) makes it a retriever, not an answer.
+
+## E18: YOLO11n-seg hold detector via D2 teacher pseudo-labels (2026-10-31, Siho)
+
+Only 19 of 2273 Kaggle images are labeled; YOLO11n-seg on GT alone underfit
+(Box/Mask mAP50 0.096/0.100, zero detections on gym photos). Converted the
+Kaggle Detectron2 Mask R-CNN weights (segm AP50 74.5) to torchvision (307
+tensors, key/channel/normalization mapping, no compiler needed) and
+pseudo-labeled 2254 unlabeled images at score>=0.6: 63,641 hold instances.
+Retrained nano on GT 14 + pseudo 2254, gold val 5: Box 0.753 / Mask 0.700.
+
+LEAKAGE NOTE: all 8 scoreboard photos (68 route cases) were inside the
+training data (5 in GT train, 3 in GT val). Clean retrain `y11n-seg-c`
+excludes all 8 (GT train 8 + pseudo 2254 / gold val 3, disjoint). Do not
+report board numbers from `y11n-seg-b`.
+
+Exported best.pt to ExecuTorch 0.6 `model.pte` (11 MB, ultralytics exporter
+with torch gate bypassed + bundled flatc); `yolo val` on the .pte matches
+torch (0.741/0.699). On-device (Galaxy S23, XNNPACK): 160-204 ms per photo,
+61-100 holds, Kotlin NMS + mask assembly, tap-to-inspect + camera capture.
+
+(Clean retrain cancelled per user 2026-10-31: `y11n-seg-c` stopped after a few
+epochs and removed. `y11n-seg-b` weights + 2254 pseudo-labels kept; the 8
+scoreboard photos remain seen-data for that model.)
+
+## E19: Clean n/s/m training excluding all 8 scoreboard photos (2026-10-31, Siho)
+
+Retrained YOLO11-seg n/s/m on GT-clean 8 + pseudo 2247 (8 eval photos fully
+excluded; gold val 3 incl. dense bh_0006 with 312 holds). All three
+early-stopped (~45 epochs, 6h total). Clean val looked bad (Mask 0.33-0.39)
+but the control settled it: leaky run-b weights score only 0.39/0.33 on the
+same clean val vs 0.75/0.70 on their own val — the clean val is harder, not
+the training worse (all three clean runs beat run-b there).
+
+Fair held-out eval on the 8 scoreboard photos (GT hold masks):
+
+| Weights | Seen 8? | Box mAP50 | Mask mAP50 |
+|---|---|---|---|
+| y11n-seg-b (leaky) | yes | 0.807 | 0.751 |
+| yolo11n-seg-clean | no | 0.708 | 0.658 |
+| yolo11s-seg-clean | no | 0.822 | 0.735 |
+| yolo11m-seg-clean | no | 0.834 | 0.735 |
+
+Leakage is worth ~10pp Box / ~9pp Mask at nano. Clean-s already beats
+leaky-n on Box and ties on Mask; clean-m adds +1pp Box only. Exported
+clean-s to ET 0.6 `model.pte` (40 MB); `yolo val` on the .pte matches torch
+(0.816/0.736).
+
+On-device clean-s (Galaxy S23, XNNPACK, sample photo, 3 runs): 55-80
+holds, infer 390-710 ms, render 220-270 ms. Nano (leaky 11 MB) was
+160-370 ms / 58-74 holds. Device inference is nondeterministic across runs
+(two stable candidate modes, 343 vs 423) while the .pte is bit-identical on
+desktop: XNNPACK threading on the phone, not an export bug.
+
+## E20: Hold-detection head-to-head: SAM 3.1 concept vs YOLO-s clean (2026-10-31, Siho)
+
+Same 8 photos, same greedy recall/precision @ IoU 0.5 vs GT hold masks
+(outputs `out/sam-detect-8/`). SAM: concept prompt "climbing hold", 1 call
+per photo (~2-4 s). YOLO-s clean (never saw the 8): conf 0.5.
+
+| Photo | GT | SAM R/P | YOLO-s R/P |
+|---|---|---|---|
+| bh_0003 | 7 | 0.57/0.67 | 0.71/0.83 |
+| bh_0074 | 236 | 0.47/1.00 | 0.50/0.85 |
+| bh_0075 | 63 | 0.94/1.00 | 0.94/0.98 |
+| bh_0457 | 76 | 0.88/0.92 | 0.87/0.96 |
+| bh_0502 | 72 | 0.86/0.95 | 0.71/0.91 |
+| bh_0518 | 48 | 0.92/0.90 | 0.77/0.82 |
+| bh_0530 | 55 | 0.87/0.89 | 0.75/0.82 |
+| bh_0917 | 79 | 0.82/1.00 | 0.65/0.93 |
+| MEAN | | 0.79/0.92 | 0.74/0.89 |
+
+SAM 3.1 leads pure hold detection by ~5pp recall / ~3pp precision, but needs
+the API (~3 s/photo); YOLO-s runs on-device in 465 ms with no API. Both miss
+hardest on dense bh_0074 (236 tiny holds).
+
+## E21: YOLO-s + Spark route finding on 68 cases (2026-10-31, Siho)
+
+New `yolo3s` finder (`feat/three-stage` 7541da7): YOLO11s-seg clean masks
+through the existing CV + single-pass Spark path, no segmentation API.
+Same 68 real-route cases, both submitted as siho9o9o:
+
+| Method | Recall | Precision | F1 | Mean s |
+|---|---|---|---|---|
+| yolo3s (v1 prompt) | 42% | 52% | 0.461 | 7.1 |
+| yolo3s-winner (v3 + embed) | 51% | 66% | 0.573 | 9.5 |
+
+yolo3s-winner takes leaderboard #2 (meta 0.639 stays #1), beating
+meta3-winner 0.569 at nearly half the time (9.5 s vs 16.1 s). Precision
+66% nearly matches meta's 68%; the gap is recall (51% vs 60%), mostly
+tapped holds YOLO misses (3 zero-find cases on bh0917).
+
+## E22: Kaggle triplet net as color-grouping feature, rejected (2026-10-31, Siho)
+
+Tested the Kaggle triplet checkpoint (`triplet_network_final.pt`, ResNet50 +
+256-d head) as an illumination-robust replacement for HSV in same-route
+retrieval: 587 truth holds across 68 real-route cases, nearest neighbor
+must share the route. Masked 128 px crops, ImageNet norm:
+
+| Feature | Same-route NN accuracy |
+|---|---|
+| HSV baseline | 354/587 = 60.3% |
+| Triplet final layer (masked) | 250/587 = 42.6% |
+| Triplet final layer (bbox) | 178/587 = 30.3% |
+| Triplet mid layer fc.0+ReLU (masked) | 321/587 = 54.7% |
+| Triplet mid layer (bbox) | 248/587 = 42.2% |
+| DINOv2-S (reference, earlier run) | 436/587 = 74.3% |
+
+Even the mid-layer embedding loses to plain HSV on 6/8 walls, and the
+ResNet50 backbone is too heavy for on-device anyway. Rejected; HSV stays
+the practical feature. Raw per-image numbers in
+`out/trip-proto/retrieval_early.json`.
+
+## E23: CV color follow-ups: histogram beats DINOv2 (2026-10-31, Siho)
+
+Same 587-hold same-route NN protocol as the triplet test. Gray-world
+white balance per wall, HS histograms (16x16, Bhattacharyya/correlation,
+8x8 EMD), gray-world Lab means, DINOv2-S re-run, and z-score HSV+DINO
+ensembles:
+
+| Feature | Accuracy |
+|---|---|
+| HSV baseline | 352/587 = 60.0% |
+| Gray-world + HSV | 375/587 = 63.9% |
+| Gray-world + Lab mean | 416/587 = 70.9% |
+| Gray-world + ab mean | 367/587 = 62.5% |
+| HS hist correlation | 445/587 = 75.8% |
+| HS hist Bhattacharyya | 457/587 = 77.9% |
+| HS hist EMD | 429/587 = 73.1% |
+| HS hist Bhattacharyya (gray-world) | 456/587 = 77.7% |
+| HSV 3D hist (8x8x4) | 364/587 = 62.0% |
+| DINOv2-S masked | 433/587 = 73.8% |
+| Ensemble DINO 0.3 + HSV 0.7 | 460/587 = 78.4% |
+| Ensemble DINO 0.5 + HSV 0.5 | 459/587 = 78.2% |
+| Ensemble DINO 0.7 + HSV 0.3 | 465/587 = 79.2% |
+
+HS histogram + Bhattacharyya alone beats DINOv2 by 4pp with zero model
+and ~12 s total pairwise CPU time (EMD included). Winners: hist_bhatt
+for on-device (no weights, OpenCV only), DINO 0.7 + HSV 0.3 ensemble
+for the server path. Raw numbers in `out/cv-proto/retrieval.json`.
+
+## E24: HS-histogram hints in the pipeline, yolo3s-hist (2026-11-01, Siho)
+
+Ported the retrieval winner into `topo_agent/pipeline.py` (`feat/hist-color`):
+`classify_colors` stores a normalized 16x16 HS histogram per hold, ranking
+similarities prefer it over the HSV mean, and `META3_HIST=1` adds a `hist`
+top-3 column to the Spark table (mirrors the `embed` column, no model needed).
+125 unittests pass, pyflakes clean.
+
+Two findings on the way: union-find grouping on hist over-merges (fallback
+F1 0.27-0.35 vs 0.356 for HSV-only, measured offline without API), so groups
+stay HSV-based; and a hints-off rerun scored 46%/65% vs the earlier 51%/66%,
+pinning Spark single-pass run-to-run noise near ±5pp recall.
+
+68-case leaderboard (`yolo3s-hist`, run 1172a18a, siho9o9o):
+
+| Method | Recall | Precision | F1 | Mean s |
+|---|---|---|---|---|
+| yolo3s-winner (before) | 51% | 66% | 0.573 | 9.5 |
+| yolo3s-hist (hist hints) | 50% | 69% | 0.581 | 12.4 |
+
+Precision 69% is the best on the board (meta 68%); the +0.008 F1 gain sits
+inside Spark noise but takes #2 behind meta 0.639. Extra time is histogram
+building on dense walls. Raw traces in `out/bench68hist2/`.
+
+## E25: Offline tap-to-group route finder in the mobile apps (2026-11-01, Siho)
+
+Same histogram idea, fully on-device (`feat/hist-route-app`): after YOLO
+detection the app builds a 16x16 HS histogram per hold over mask-interior
+pixels and tapping a hold keeps matches (Bhattacharyya >= 0.6) bright while
+the rest dim; wall tap clears. Threshold calibrated on 3,075 same-route /
+31,577 diff-route truth pairs: 0.6 keeps 84% recall at 14% false positives.
+Android verified with a real `assembleDebug` build (25 MB APK); iOS mirrors
+the logic in `YoloSeg.swift`/`ContentView.swift` (needs an Xcode build).
+
+## E26: Muse Spark direct from the Android app (2026-11-01, Siho)
+
+First tried serving `yolo3s` over a Cloudflare tunnel for the phone browser
+(`feat/yolo3s-web`: web GUI + `meta3`/`yolo3s` methods, smoke-tested 9 holds
+in 20.5 s), then dropped it: the phone can call the Meta API directly, which
+saves the tunnel relay and works without the PC. New `SparkRoute.kt`
+(`feat/hist-route-app`) ports the server's Spark stage — colors, groups,
+neighbors, hist hints, prompt table, v3 system prompt verbatim, annotated
+photo + tap close-up, one `muse-spark-1.3` call, strict answer parsing.
+Taps group offline instantly, then the Spark answer replaces the grouping;
+the key is pasted in-app (SharedPreferences, never baked into the APK) and
+any failure keeps the offline grouping. Verified with `assembleDebug` plus
+6 Robolectric unit tests (table shape, request contract, parser); on-device
+run pending (no device attached at build time).
+
+## E27: Phone UI: tap frame, stopwatch, grayscale route (2026-11-01, Siho)
+
+`feat/hist-route-app`: tapped hold gets a black-and-white target frame,
+Spark waits show a ticking `asking spark… N.N s` stopwatch, and a confirmed
+Spark route renders in color on a grayscaled wall. Verified end-to-end via
+adb-driven taps + screenshots: tap #35 → stopwatch → `spark route 7/100 ·
+conf 0.90 · 20596 ms` with the route in color on gray. Fixed one crash on
+the way (`createBitmap` is immutable; overlay now copies mutable) with a
+Robolectric regression test.
+
+## E28: Close-up ablation: no gain either way (2026-11-01, Siho)
+
+`TOPO_NO_CLOSEUP=1` drops the 256px tap close-up (4th content part) to test
+whether 2 images suffice (`exp/no-closeup`). Same 10 cases, yolo3s-hist
+config, both directions:
+
+| Config | Recall | Precision | F1 | Mean s |
+|---|---|---|---|---|
+| With close-up | 42% | 70% | 0.525 | 7.9 |
+| Without close-up | 44% | 63% | 0.518 | 8.0 |
+
+No meaningful difference: scores sit inside Spark noise and time is
+identical (the tile is tiny). Kept the close-up; phone latency must be
+attacked elsewhere (selective Spark calls, not smaller payloads).
+Raw rows in `out/bench10noclose/`.
+
+## E29: Tap-miss recovery with a synthetic tap box (2026-11-01, Siho)
+
+YOLO ignores point prompts, so when it missed the tapped hold (17 of 68 cases)
+the pipeline answered [] without calling Spark. `find_with` now appends a
+small tap-centered box (`tap_made` trace flag) that rides through colors,
+hints, table, close-up and answer like any other candidate.
+
+| Method | Recall | Precision | F1 | Mean s |
+|---|---|---|---|---|
+| yolo3s-hist (before) | 50% | 69% | 0.581 | 12.4 |
+| yolo3s-tapfix (after) | 60% | 60% | 0.603 | 17.4 |
+
+All 17 rescued cases return holds; recall matches meta (60%). Extra time is
+the rescued cases now reaching Spark. Submitted as `yolo3s-tapfix` (new
+frontier). Raw traces in `out/bench68tapfix/`.
+
+## E30: No-tint phone UI verified on S23 (2026-11-02, Siho)
+
+Removed all hold tinting: the photo shows plain until a tap, then everything
+outside the route goes grayscale with a tap frame — for the instant offline
+grouping and the Spark answer alike. Verified via adb-driven taps and
+screenshots: tap #67 → grayscale + stopwatch → `spark route 13/100 ·
+conf 0.85 · 25463 ms`, no crash.
+
 ## Shared MCP experiment records
 
 These entries were exported from the team MCP server. The server database
