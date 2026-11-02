@@ -32,7 +32,7 @@ photo (debug build).
   - output 0 `[1,37,8400]` (cx/cy/w/h, conf, 32 coefs), output 1 `[1,32,160,160]`
   - conf 0.5, NMS IoU 0.5, mask sigmoid threshold 0.5
 - `ContentView.swift`: photo library + camera capture, before/after toggle,
-  tap-to-inspect (smallest containing box wins).
+  tap-to-group-the-route (smallest containing box wins, wall tap clears).
 
 ## Notes
 

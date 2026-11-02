@@ -12,6 +12,8 @@ struct ContentView: View {
   @State private var proto: [Float] = []
   @State private var geo: (Float, Float, Float) = (1, 0, 0)
   @State private var selected = -1
+  @State private var hists: [[Float]] = []
+  @State private var route: Set<Int> = []
   @State private var engine: YoloSeg?
 
   let palette: [UIColor] = [
@@ -22,7 +24,7 @@ struct ContentView: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
       Text("Hold detector").font(.title).bold()
-      Text("YOLO11s-seg · one pass, every hold · tap to inspect")
+      Text("YOLO11s-seg · one pass, every hold · tap to group the route")
         .font(.caption).foregroundColor(.secondary)
       Text(status).font(.headline).foregroundColor(.green)
       HStack {
@@ -75,6 +77,8 @@ struct ContentView: View {
     status = "detecting holds…"
     selected = -1
     dets = []
+    hists = []
+    route = []
     overlay = nil
     photo = ui
     DispatchQueue.global(qos: .userInitiated).async {
@@ -84,12 +88,14 @@ struct ContentView: View {
         return
       }
       let ms = Date().timeIntervalSince(t0) * 1000
+      let hh = engine.holdHists(base: ui, dets: found, proto: pr, geo: g)
       let ov = engine.render(base: ui, dets: found, proto: pr, geo: g,
                              selected: -1, palette: palette)
       DispatchQueue.main.async {
         dets = found
         proto = pr
         geo = g
+        hists = hh
         overlay = ov
         showOverlay = true
         status = String(format: "hold-yolo · %d holds · infer %.0f ms", found.count, ms)
@@ -110,12 +116,27 @@ struct ContentView: View {
         if a < bestArea { bestArea = a; best = i }
       }
     }
-    guard best >= 0, let engine, let ui = photo,
-          let ov = engine.render(base: ui, dets: dets, proto: proto, geo: geo,
-                                 selected: best, palette: palette) else { return }
+    guard let engine, let ui = photo else { return }
+    if best < 0 { // tapping the wall clears the route
+      guard selected >= 0 else { return }
+      selected = -1
+      route = []
+      overlay = engine.render(base: ui, dets: dets, proto: proto, geo: geo,
+                              selected: -1, palette: palette)
+      status = String(format: "%d holds · tap a hold", dets.count)
+      return
+    }
+    let grp: Set<Int> =
+      hists.count == dets.count
+      ? Set(dets.indices.filter { YoloSeg.histSim(hists[best], hists[$0]) >= YoloSeg.routeSim })
+      : [best]
+    guard let ov = engine.render(base: ui, dets: dets, proto: proto, geo: geo,
+                                 selected: best, palette: palette, route: grp) else { return }
     selected = best
+    route = grp
     overlay = ov
-    status = String(format: "hold #%d · conf %.2f · %d holds", best, dets[best].conf, dets.count)
+    status = String(format: "hold #%d · route %d/%d holds · conf %.2f",
+                    best, grp.count, dets.count, dets[best].conf)
   }
 }
 

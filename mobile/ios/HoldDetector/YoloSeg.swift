@@ -16,6 +16,8 @@ final class YoloSeg {
   static let confThresh: Float = 0.5
   static let nmsThresh: Float = 0.5
   static let maxDets = 100
+  static let histBins = 16
+  static let routeSim: Float = 0.6
 
   private let module: Module
 
@@ -109,9 +111,80 @@ final class YoloSeg {
     return kept
   }
 
+  /// Normalized 16x16 HS histogram per hold over mask-interior pixels (stride 2).
+  func holdHists(base: UIImage, dets: [Detection], proto: [Float],
+                 geo: (Float, Float, Float)) -> [[Float]] {
+    guard let cg = base.cgImage else { return dets.map { _ in [Float](repeating: 0, count: 256) } }
+    let w = cg.width, h = cg.height
+    let (scale, padX, padY) = geo
+    guard let ctx = CGContext(data: nil, width: w, height: h,
+                              bitsPerComponent: 8, bytesPerRow: w * 4,
+                              space: CGColorSpaceCreateDeviceRGB(),
+                              bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
+          let buf = ctx.data?.assumingMemoryBound(to: UInt8.self) else {
+      return dets.map { _ in [Float](repeating: 0, count: 256) }
+    }
+    ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+    let p = YoloSeg.proto, n = YoloSeg.coefs, b = YoloSeg.histBins
+    return dets.map { d in
+      var hist = [Float](repeating: 0, count: b * b)
+      let gx0 = (d.x1 * scale + padX) / 4, gy0 = (d.y1 * scale + padY) / 4
+      let gx1 = (d.x2 * scale + padX) / 4, gy1 = (d.y2 * scale + padY) / 4
+      let ix0 = min(max(Int(gx0) - 1, 0), p - 1), iy0 = min(max(Int(gy0) - 1, 0), p - 1)
+      let ix1 = min(max(Int(gx1) + 1, 0), p - 1), iy1 = min(max(Int(gy1) + 1, 0), p - 1)
+      let mw = ix1 - ix0 + 1, mh = iy1 - iy0 + 1
+      var small = [Float](repeating: 0, count: mw * mh)
+      for cy in 0..<mh {
+        for cx in 0..<mw {
+          let q = (iy0 + cy) * p + (ix0 + cx)
+          var v: Float = 0
+          for k in 0..<n { v += d.coefs[k] * proto[k * p * p + q] }
+          small[cy * mw + cx] = 1 / (1 + exp(-v))
+        }
+      }
+      let bx0 = min(max(Int(d.x1), 0), w - 1), by0 = min(max(Int(d.y1), 0), h - 1)
+      let bx1 = min(max(Int(d.x2), 0), w), by1 = min(max(Int(d.y2), 0), h)
+      var count: Float = 0
+      var hue: CGFloat = 0, sat: CGFloat = 0
+      for y in stride(from: by0, to: by1, by: 2) {
+        let fy4 = ((Float(y) + 0.5) * scale + padY) / 4 - Float(iy0)
+        let y0 = min(max(Int(fy4), 0), mh - 1), y1 = min(y0 + 1, mh - 1)
+        let wy = min(max(fy4 - floor(fy4), 0), 1)
+        for x in stride(from: bx0, to: bx1, by: 2) {
+          let fx4 = ((Float(x) + 0.5) * scale + padX) / 4 - Float(ix0)
+          let x0 = min(max(Int(fx4), 0), mw - 1), x1 = min(x0 + 1, mw - 1)
+          let wx = min(max(fx4 - floor(fx4), 0), 1)
+          let v = small[y0 * mw + x0] * (1 - wx) * (1 - wy)
+            + small[y0 * mw + x1] * wx * (1 - wy)
+            + small[y1 * mw + x0] * (1 - wx) * wy
+            + small[y1 * mw + x1] * wx * wy
+          if v > 0.5 {
+            let o = (y * w + x) * 4
+            UIColor(red: CGFloat(buf[o]) / 255, green: CGFloat(buf[o + 1]) / 255,
+                    blue: CGFloat(buf[o + 2]) / 255, alpha: 1)
+              .getHue(&hue, saturation: &sat, brightness: nil, alpha: nil)
+            let hi = min(max(Int(hue * CGFloat(b)), 0), b - 1)
+            let si = min(max(Int(sat * CGFloat(b)), 0), b - 1)
+            hist[hi * b + si] += 1
+            count += 1
+          }
+        }
+      }
+      if count > 0 { hist = hist.map { $0 / count } }
+      return hist
+    }
+  }
+
+  /// Bhattacharyya coefficient of two normalized histograms (1 = same distribution).
+  static func histSim(_ a: [Float], _ b: [Float]) -> Float {
+    min(max(zip(a, b).reduce(0) { $0 + sqrt($1.0 * $1.1) }, 0), 1)
+  }
+
   /// Tint every mask (sigmoid mask at proto res, bilinear-upsampled to the box).
+  /// With a selection, the tapped hold is brightest, its route stays visible, the rest dim.
   func render(base: UIImage, dets: [Detection], proto: [Float],
-              geo: (Float, Float, Float), selected: Int, palette: [UIColor]) -> UIImage? {
+              geo: (Float, Float, Float), selected: Int, palette: [UIColor],
+              route: Set<Int> = []) -> UIImage? {
     guard let cg = base.cgImage else { return nil }
     let w = cg.width, h = cg.height
     let (scale, padX, padY) = geo
@@ -125,8 +198,9 @@ final class YoloSeg {
     let order = dets.indices.sorted { ($0 == selected ? 1 : 0) < ($1 == selected ? 1 : 0) }
     for idx in order {
       let d = dets[idx]
-      let bright = idx == selected
-      let alpha: Float = bright ? 0.7 : 0.45
+      let alpha: Float
+      if idx == selected { alpha = 0.8 } else if selected < 0 { alpha = 0.45 }
+      else if route.contains(idx) { alpha = 0.55 } else { alpha = 0.10 }
       var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0
       palette[idx % palette.count].getRed(&r, green: &g, blue: &b, alpha: nil)
       let cr = Float(r * 255) * alpha, cg2 = Float(g * 255) * alpha, cb = Float(b * 255) * alpha

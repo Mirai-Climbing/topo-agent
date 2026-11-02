@@ -2,7 +2,7 @@
 
 One-shot climbing-hold segmentation on the phone. A YOLO11n-seg model
 (ExecuTorch `.pte`) runs once per photo; every hold mask is drawn immediately.
-No network, no API calls.
+Taps group the route offline; with a Muse Spark key they also ask Spark.
 
 ## Origin
 
@@ -18,7 +18,13 @@ calls — was written for this project.
 - Sample photo (`gym.jpg` asset, optional) detected at launch
 - Camera capture with EXIF rotation handling
 - Gallery pick (system photo picker, no permission needed)
-- Tap a hold to inspect (index + confidence)
+- Tap a hold to group its route offline (HS-histogram match ≥ 0.6): the
+  route keeps color, everything else goes grayscale, tap frame on the tap;
+  tap the wall to clear, index + route size in status
+- Optional Spark route: paste a `MODEL_API_KEY` in the key row and every tap
+  also sends one Spark call (same v3 prompt, table, and photos as the server
+  pipeline); the Spark answer replaces the offline grouping, and any failure
+  keeps the offline grouping. The key lives only in app preferences.
 - Before/after toggle
 
 ## Build
