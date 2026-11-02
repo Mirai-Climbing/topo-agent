@@ -528,6 +528,14 @@ All 17 rescued cases return holds; recall matches meta (60%). Extra time is
 the rescued cases now reaching Spark. Submitted as `yolo3s-tapfix` (new
 frontier). Raw traces in `out/bench68tapfix/`.
 
+## E30: No-tint phone UI verified on S23 (2026-11-02, Siho)
+
+Removed all hold tinting: the photo shows plain until a tap, then everything
+outside the route goes grayscale with a tap frame — for the instant offline
+grouping and the Spark answer alike. Verified via adb-driven taps and
+screenshots: tap #67 → grayscale + stopwatch → `spark route 13/100 ·
+conf 0.85 · 25463 ms`, no crash.
+
 ## Shared MCP experiment records
 
 These entries were exported from the team MCP server. The server database
