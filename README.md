@@ -77,6 +77,24 @@ flowchart LR
   if SAM fails too, to the pre-hackathon color-only method.
 - Every step is traced (tool, arguments, result summary, milliseconds), so the app can show how the agent decided.
 
+### Three-stage mode (`meta3`)
+
+A faster alternative with no ReAct loop: SAM segments, computer vision classifies each hold's color
+(HSV + CIELAB, mask-boundary pixels excluded) and groups holds by color with spatial neighbors,
+then Muse Spark finds the tapped hold's route in exactly one model call and answers with JSON only
+(same task, sampling and input evidence as the agent: photo, numbered outlines, tap close-up).
+No retries: invalid JSON falls back to the tapped hold's CV color group.
+([`topo_agent/pipeline.py`](topo_agent/pipeline.py))
+
+```bash
+python -m topo_agent.eval --bench --methods meta3 --seeds 11
+```
+
+`META3_PROMPT` selects the single-pass system prompt variant: `v1` (default, the original rules),
+`v2` (trusts the photos over the color table, rejects wall-colored pale lookalikes) or
+`v3` (v2 plus cross-group merging and hold chains for shadowed routes).
+The variant is recorded in the trace (`(spark)` step) and in `run_once` info.
+
 ## Results so far
 
 ### Real gym photos: the real test, and our main work now
@@ -110,20 +128,35 @@ Hard sample walls drawn by code ([`topo_agent/baseline/bench.py`](topo_agent/bas
 | Method | Recall | Precision | Seconds / photo |
 |---|---|---|---|
 | `color`: color only (pre-hackathon) | 85% | 96% | 0.8 |
-| `sam_color`: SAM 3.1 + color filter, no agent | 90% | 86% | 1.8 |
-| **`meta`: SAM 3.1 + Muse Spark agent** | **99%** | **100%** | **7.6** |
+| `sam_color`: SAM 3.1 + color filter, no agent | 90% | 86% | 1.6 |
+| **`meta`: SAM 3.1 + Muse Spark agent** | **99%** | **100%** | **6.8** |
+| `meta3`: three-stage, single pass | 99% | 96% | 5.1 |
 
 - **Tape problems: recall 14% → 100%.** Hold colors are mixed and only the tape tells the problem apart. The agent looks
   at a close-up of the tapped hold first, sees the tape, and stops trusting colors.
 - **Same color on the next wall (`twins`): 57% → 100% recall, without the 58% precision of a plain color filter.**
   The agent follows the chain of same-color holds from the tapped one and leaves the other group out.
 - The only miss is one washed-out hold that SAM did not segment (`light`).
-- Speed went from 36 s to 7.6 s per photo: the first message already carries a table of candidates (color, position,
+- Speed went from 36 s to 6.8 s per photo: the first message already carries a table of candidates (color, position,
   linked, gap), so clear cases are answered in one turn, and Muse Spark runs with `reasoning_effort: low`.
+- `meta3` matches the agent on drawn walls (tape 7/7 both, one pass at ~3.2 s vs one agent turn at ~5 s):
+  asking for the tapped route only, with the tap close-up in the single request, fixed both the tape
+  misses and the whole-wall reasoning cost of the first version.
 - Caveat: these walls were also used while tuning the agent, so they guard against regressions; they don't measure
   the product. Real photos do.
 
 Every experiment, including the ones that didn't work, is in the [experiment log](docs/experiments.md).
+
+Real gym photos (same 68-route eval as above, one run per method):
+
+| Method | Recall | Precision | F1 | Seconds / photo |
+|---|---|---|---|---|
+| `yolo3s-tapfix`: this PR — YOLO-seg finder, histogram hints, tap fix | 60% | 60% | 0.60 | 17.4 |
+
+- Matches `meta` recall (60%) at about half the time (17 s vs 31 s). The YOLO finder
+  replaces per-photo SAM segmentation, histogram color hints steady the single Spark
+  pass, and tap-miss recovery rescues the 17 cases where detection missed the tapped
+  hold (they used to answer `[]`). Submitted to the team leaderboard as `yolo3s-tapfix`.
 
 ## Try it (for judges)
 
