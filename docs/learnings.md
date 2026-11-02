@@ -156,3 +156,95 @@ Implication: keep 1280 px; prune text rows, not image detail.
 `TOPO_SKIP_COVERED_POINT` saved the third SAM call on 7/8 real cases (0074
 correctly kept it: tap uncovered). Same candidates by construction.
 Implication: keep on; report the real call count from the trace.
+
+## A verify pass trades recall for precision at equal F1
+
+A second drop-only Spark call over answer crops moved 68-route scores from
+57%/57% to 50%/65% (F1 0.569 to 0.568) at +7 s. It drops true holds as well as
+lookalikes.
+Implication: verification needs higher precision itself (stricter drop rules) to
+beat single-pass F1.
+
+## Aggressive shortlisting cuts true holds on real walls
+
+Embedding-first shortlist to 24 candidates lost recall 57% to 54% at similar
+precision: pruned-away holds can't be recovered since parsing uses shortlist ids.
+Implication: shortlist for the table but parse against the full set, or widen.
+
+## Zero-LLM ranker: best recall, unusable precision
+
+Color*embed scoring with LINK chaining reached 61% recall (above meta's 60%) in
+5.6 s with no Spark calls, but precision 24% with 1478 found holds.
+Implication: a strong cheap retriever; pair it with an LLM filter instead of a
+raw answer.
+
+## 19 labeled images cannot train YOLO-seg; pseudo-labels can
+
+Nano trained on 14 GT images reached mAP50 0.10 with zero gym detections.
+Same setup + 63k teacher pseudo-labels reached Mask 0.70, near the teacher's
+own 0.745. Implication: distill the heavy public weights instead of training
+from scratch on tiny GT.
+
+## D2 weights are convertible to torchvision without detectron2
+
+R50-FPN Mask R-CNN maps cleanly (anchors, FPN, RPN, ROI heads) with three
+traps: D2 class order is bg-last vs torchvision bg-first, D2 bbox/mask
+predictors are fg-only (zero-pad the bg channel), and D2 pixel mean/std are
+in 0-255 units while torchvision normalizes 0-1 inputs. Verified visually:
+class 1 = holds, class 2 = volumes.
+
+## Scoreboard photos must be excluded before training, not after
+
+All 8 eval photos (68 cases) were in GT train/val, found only when the user
+asked. Detection mAP from that run is optimistic. Implication: hash-match
+eval photos against every training source (GT and pseudo) before launching.
+
+## Tiny val sets lie; control with cross-eval before concluding
+
+Clean val (3 images, 312 of 370 instances from one dense wall) showed Mask
+0.33-0.39 and looked like a training failure. Running the old 0.70 weights
+on the same val gave 0.33 — the val was harder, training was fine.
+Implication: when a split change tanks metrics, cross-evaluate old weights
+on the new split before touching hyperparameters.
+
+## Small beats nano-plus-leakage on unseen walls
+
+On 8 held-out photos, clean-s (0.822/0.735) beats leaky-n (0.807/0.751)
+despite the latter training on those exact photos; clean-m adds almost
+nothing over clean-s. Implication: ship small for unseen gyms; medium is
+not worth 3x the size/latency.
+
+## Triplet re-ID net != route similarity
+
+The Kaggle climbing-hold triplet network was trained for instance re-ID
+(same physical hold across overlapping photos), which is the opposite of
+route grouping (different holds, same color/route). Its final embedding
+scores 42.6% same-route NN accuracy vs 60.3% for plain HSV; even its
+mid-layer features (54.7%) lose to HSV. Lesson: match the pretraining
+objective to the task before borrowing a checkpoint; DINOv2 (74.3%)
+remains the best server-side feature, HSV the best on-device one.
+
+## Histograms beat embeddings for hold color grouping
+
+For same-route hold retrieval under gym lighting, a 16x16 hue-saturation
+histogram with Bhattacharyya distance (77.9%) beats both plain HSV means
+(60.0%) and DINOv2-S embeddings (73.8%) — no neural net needed. Why it
+works: a distribution over hue/saturation tolerates shadows and
+highlights on the same hold, while a single mean color shifts. Corollaries
+confirmed by ablation: adding the V channel back (3D hist 62.0%) destroys
+the gain, and gray-world balancing adds nothing once the histogram is
+used (77.7%). Gray-world + Lab mean (70.9%) is the best single-vector
+option when a compact feature is required. Practical upshot: the
+on-device route grouper can use OpenCV histograms, and the server path
+gains another point from a DINO 0.7 + HSV 0.3 z-score ensemble (79.2%).
+
+## Pairwise similarity survives, clustering dilutes
+
+HS-histogram Bhattacharyya wins same-route nearest-neighbor retrieval at
+77.9% (vs 60.0% HSV, 73.8% DINOv2), yet union-find grouping on the same
+signal over-merges through chained 14%-FPR pairs and scores no better than
+HSV groups as a fallback (F1 0.35 both). What transfers to the pipeline is
+the NN form: per-row top-3 hints for Spark, and tap-anchored thresholding
+on-device. Second lesson: Spark single-pass answers vary ±5pp recall
+run-to-run, so leaderboard deltas under ~0.02 F1 need repeated runs before
+claiming a win.
