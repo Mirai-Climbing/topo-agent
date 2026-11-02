@@ -11,3 +11,6 @@ gemini = ["google-genai"]
 
 [tool.setuptools]
 packages = ["topo_agent", "topo_agent.baseline"]
+
+[tool.setuptools.package-data]
+topo_agent = ["demo_runs/*.json"]
