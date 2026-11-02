@@ -8,6 +8,15 @@ the rest, train nano/small/medium.
 This directory holds training entry points only. Runtime agent code lives in
 `topo_agent/`; the Android app lives outside this repo (`~/et-build/hold-app`).
 
+## Data license
+
+Labels, photos and the teacher checkpoint come from the Kaggle dataset
+[Indoor Climbing Gym Hold Segmentation](https://www.kaggle.com/datasets/tomasslama/indoor-climbing-gym-hold-segmentation)
+by Tomas Slama, licensed [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/):
+we may share and adapt with credit, and adaptations (including the shipped
+`.pte` weights) carry the same license. Credit the dataset if you redistribute
+the weights.
+
 ## Requirements
 
 A CUDA venv with torch (see `requirements-train.txt`). Training env and the
