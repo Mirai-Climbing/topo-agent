@@ -8,7 +8,8 @@ Taps group the route offline; with a Muse Spark key they also ask Spark.
 
 The app scaffold (ExecuTorch model loading, tap-to-mask activity wiring) is
 adapted from [etsam-demo](https://github.com/john-rocky/executorch-samples/tree/HEAD/etsam-demo)
-by john-rocky. That repo ships no license file. Everything hold-specific —
+by john-rocky. BSD-3-Clause (stated in its README); see LICENSE-etsam-demo.
+Everything hold-specific —
 YOLO-seg post-processing, camera/gallery flow, offline grouping, direct Spark
 calls — was written for this project.
 
