@@ -1,4 +1,4 @@
-package io.github.johnrocky.etsamdemo
+package com.miraiclimbing.holddetector
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -31,7 +31,7 @@ import org.pytorch.executorch.EValue
 import org.pytorch.executorch.Module
 import org.pytorch.executorch.Tensor
 
-internal const val TAG = "ETSAMDemo"
+internal const val TAG = "HoldDetector"
 
 private const val BACKGROUND = 0xFF101014.toInt()
 private const val ACCENT = 0xFF6FE3B4.toInt()

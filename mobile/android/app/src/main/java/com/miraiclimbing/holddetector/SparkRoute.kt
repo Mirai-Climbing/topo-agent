@@ -1,4 +1,4 @@
-package io.github.johnrocky.etsamdemo
+package com.miraiclimbing.holddetector
 
 import android.graphics.Bitmap
 import android.graphics.Canvas

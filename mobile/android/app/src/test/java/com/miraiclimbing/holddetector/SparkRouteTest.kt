@@ -1,4 +1,4 @@
-package io.github.johnrocky.etsamdemo
+package com.miraiclimbing.holddetector
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
