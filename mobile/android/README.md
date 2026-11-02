@@ -1,0 +1,62 @@
+# Hold Detector (Android)
+
+One-shot climbing-hold segmentation on the phone. A YOLO11n-seg model
+(ExecuTorch `.pte`) runs once per photo; every hold mask is drawn immediately.
+No network, no API calls.
+
+## Origin
+
+The app scaffold (ExecuTorch model loading, tap-to-mask activity wiring) is
+adapted from [etsam-demo](https://github.com/john-rocky/executorch-samples/tree/HEAD/etsam-demo)
+by john-rocky. BSD-3-Clause (stated in its README); see LICENSE-etsam-demo.
+Everything hold-specific —
+YOLO-seg post-processing, camera/gallery flow, offline grouping, direct Spark
+calls — was written for this project.
+
+## Features
+
+- Sample photo (`gym.jpg` asset, optional) detected at launch
+- Camera capture with EXIF rotation handling
+- Gallery pick (system photo picker, no permission needed)
+- Tap a hold to inspect (index + confidence)
+- Before/after toggle
+
+## Build
+
+Prerequisites: JDK 17, Android SDK 34+, `org.pytorch:executorch-android:0.6.0`
+from Maven (declared in `app/build.gradle`).
+
+```bash
+cd mobile/android
+./gradlew :app:assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+## Model
+
+Push `mobile/assets/hold_yolo.pte` to the app's files dir (the app shows the
+exact path when it is missing):
+
+```bash
+adb push ../assets/hold_yolo.pte \
+  /sdcard/Android/data/com.miraiclimbing.holddetector/files/hold_yolo.pte
+```
+
+The `.pte` must match the ExecuTorch 0.6 runtime. To retrain or re-export, see
+`training/` (export with `export_et.py`).
+
+## Sample photo (optional)
+
+Drop any climbing photo at `app/src/main/assets/gym.jpg` to have it detected
+at launch. Without it the app starts in camera-only mode. Real gym photos are
+never committed; see the repo `.gitignore`.
+
+## Measured on Galaxy S23 (clean-s model, sample photo, 3 runs)
+
+- Inference: 390-710 ms per photo (XNNPACK)
+- Render (Kotlin NMS + mask assembly): 220-270 ms for 55-80 holds
+- Nano reference: 160-370 ms infer, 58-74 holds
+
+Note: on-device results vary run to run (two stable modes, 343 vs 423
+candidates) while the same `.pte` is bit-identical across desktop runs —
+device-side XNNPACK threading nondeterminism, not an export bug.
