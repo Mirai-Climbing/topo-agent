@@ -164,18 +164,21 @@ Every experiment, including the ones that didn't work, is in the [experiment log
 No account or login is needed. Everything below runs from this repository.
 
 ```bash
-python -m venv .venv
-.venv/Scripts/pip install -e .    # Windows; use .venv/bin/pip elsewhere
+python3 -m venv .venv            # Windows: python -m venv .venv
+source .venv/bin/activate         # Windows: .venv\Scripts\activate
+pip install -e .
 
 # Without a key: replay a recorded run on a drawn sample wall (no API call, clearly marked RECORDED)
-.venv/Scripts/python -m topo_agent.demo                  # tape problem: holds of all colors, marked by white tape
-.venv/Scripts/python -m topo_agent.demo --scene twins    # the same color on the next wall, in another problem
+python -m topo_agent.demo                  # tape problem: holds of all colors, marked by white tape
+python -m topo_agent.demo --scene twins    # the same color on the next wall, in another problem
 
 # With a Meta Model API key: run SAM 3.1 + Muse Spark for real
-export MODEL_API_KEY=...                                 # PowerShell: $env:MODEL_API_KEY="..."
-.venv/Scripts/python -m topo_agent.demo --live --scene tape
-.venv/Scripts/python -m topo_agent.demo --live --photo wall.jpg --tap 0.42,0.63   # your own photo; tap as 0-1 fractions
+export MODEL_API_KEY=...                   # PowerShell: $env:MODEL_API_KEY="..."
+python -m topo_agent.demo --live --scene tape
+python -m topo_agent.demo --live --photo wall.jpg --tap 0.42,0.63   # your own photo; tap as 0-1 fractions
 ```
+
+Tested from a fresh clone on Windows and Ubuntu.
 
 Each run prints "What the AI did" (every tool call and the agent's one-sentence reason) and writes
 `demo-result.png` with the problem outlined. On the sample walls it also checks the answer. The recorded runs in
@@ -187,9 +190,10 @@ The agent also runs in production in our app, Mirai Climbing. That needs a login
 ## Run it
 
 ```bash
-python -m venv .venv
-.venv/Scripts/pip install -e .    # Windows; use .venv/bin/pip elsewhere
-.venv/Scripts/python -m unittest discover -s tests -t .
+python3 -m venv .venv            # Windows: python -m venv .venv
+source .venv/bin/activate         # Windows: .venv\Scripts\activate
+pip install -e .
+python -m unittest discover -s tests -t .
 ```
 
 Tests use a fake SAM and a fake Muse Spark, so they need no key. To call Meta Model API, set `MODEL_API_KEY`:
