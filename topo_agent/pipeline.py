@@ -64,6 +64,7 @@ from topo_agent.baseline.shape import _covers, _hsv, _inside, _mean
 log = logging.getLogger(__name__)
 
 SHRINK = 0.85  # outlines are shrunk toward their center for color sampling (excludes mask-boundary pixels)
+TAP_R = 0.02  # half-side (fraction of width) of the synthetic tap box when no candidate covers the tap
 HIST_H = 16  # hue bins of the per-hold HS histogram stored by classify_colors
 HIST_S = 16  # saturation bins of the same histogram
 MIN_PIXELS = 5  # fewer inside pixels than this: sample the unshrunk outline instead
@@ -829,6 +830,19 @@ def verify_once(spark, img, cands, tap_id, ids):
                    "fallback": "", "confidence": parsed["confidence"]}
 
 
+def tap_candidate(point, next_id):
+    """A synthetic hold box around the tap for finders that miss it.
+
+    SAM recovers an uncovered tap with a point prompt, but YOLO ignores prompts, so without
+    this the pipeline would answer [] whenever YOLO misses the tapped hold. The box carries
+    the tap through colors, hints, table, close-up and answer like any other candidate."""
+    x, y = point["x"], point["y"]
+    return {"id": next_id, "x": x, "y": y, "r": TAP_R,
+            "points": [[x - TAP_R, y - TAP_R], [x + TAP_R, y - TAP_R],
+                       [x + TAP_R, y + TAP_R], [x - TAP_R, y + TAP_R]],
+            "conf": 0.0, "tap_made": True}
+
+
 def find_with(sam, spark, jpeg, point, on_trace=None, clock=time.monotonic,
               prompt="", embedder=None, use_embed=None, use_verify=None,
               use_shortlist=None, shortlist_cap=None, use_hist=None):
@@ -866,9 +880,9 @@ def find_with(sam, spark, jpeg, point, on_trace=None, clock=time.monotonic,
     trace = [{"tool": "(sam)", "args": {"count": len(cands), "sam_calls": stats.get("sam_calls", 3)},
               "ms": round((clock() - started) * 1000)}]
     if tap_id is None:
-        if on_trace:
-            on_trace(trace)
-        return []
+        cands.append(tap_candidate(point, max((c["id"] for c in cands), default=-1) + 1))
+        tap_id = cands[-1]["id"]
+        trace[0]["args"]["tap_made"] = True
     started = clock()
     classify_colors(img, cands)
     group_by_color(cands)

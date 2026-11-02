@@ -562,6 +562,21 @@ class SpeedupTest(unittest.TestCase):
         self.assertEqual(skipped_calls, 2)
         self.assertEqual(len(holds), 2)  # same answer with one fewer SAM call
 
+    def test_missed_tap_gets_a_synthetic_candidate(self):
+        jpeg = jpeg_of(wall())
+        tap = {"x": 415 / W, "y": 212 / H}  # the blue hold, missed by every prompt
+        text = "<0f>" + record(0, HOLDS[0][0]) + "," + record(1, HOLDS[1][0])
+        post, _ = fake_api({"climbing hold": text, "climbing volume": text})  # point finds nothing
+        spark = RunOnceTest().route_reply(ids=(0, 1))
+        traces = []
+        with clean_env(TOPO_SKIP_COVERED_POINT="1"):
+            holds = pipeline.find_with(sam.Sam(post), spark, jpeg, tap, on_trace=traces.append)
+        self.assertTrue(traces[0][0]["args"].get("tap_made"))
+        self.assertEqual(len(holds), 3)  # the tap rides along instead of answering []
+        tap_hold = [h for h in holds if abs(h["x"] - tap["x"]) < 1e-9]
+        self.assertEqual(len(tap_hold), 1)
+        self.assertEqual(len(tap_hold[0]["points"]), 4)
+
     def test_prompt_is_full_by_default(self):
         cands = many_cands()
         with clean_env():
