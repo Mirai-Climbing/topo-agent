@@ -16,6 +16,7 @@ The key (MODEL_API_KEY) is read from the environment. Photos are only sent, neve
 import base64
 import io
 import json
+import os
 import re
 
 from PIL import Image
@@ -29,6 +30,24 @@ CONCEPTS = ("climbing hold", "climbing volume")  # concept prompts (volumes are 
 MAX_POINTS = 32  # max points per outline
 SAME = 0.6  # two candidates overlapping this much are the same object
 
+def _int_env(name, default):
+    """An integer env knob, or default when unset or invalid."""
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def send_side():
+    """Long side of the photo sent to SAM. TOPO_SAM_SIDE shrinks the upload; default is SEND_SIDE."""
+    return _int_env("TOPO_SAM_SIDE", SEND_SIDE)
+
+
+def send_quality():
+    """JPEG quality of the photo sent to SAM. TOPO_SAM_QUALITY shrinks the upload; default is 88."""
+    return _int_env("TOPO_SAM_QUALITY", 88)
+
+
 _FRAME = re.compile(r"<(\d+)f>")
 _RECORD = re.compile(r"(?P<id>\d+)<\|box;(?P<box>[^|]*)\|><\|mask;(?P<mask>.*?)\|>(?=,\d+<\|box;|\s*$)")
 
@@ -37,13 +56,14 @@ def _kv(s):
     return dict(p.split("=", 1) for p in s.split(";") if "=" in p)
 
 
-def shrink(jpeg, side=SEND_SIDE):
+def shrink(jpeg, side=None, quality=None):
     """JPEG resized for sending, with its width and height."""
     with Image.open(io.BytesIO(jpeg)) as raw:
         img = raw.convert("RGB")
+    side = send_side() if side is None else side
     img.thumbnail((side, side))
     out = io.BytesIO()
-    img.save(out, "JPEG", quality=88)
+    img.save(out, "JPEG", quality=send_quality() if quality is None else quality)
     return out.getvalue(), img.width, img.height
 
 
@@ -188,7 +208,6 @@ def http_post(env, timeout=60):
 
 if __name__ == "__main__":
     # Try it: python -m topo_agent.sam photo.jpg [noun phrase | x,y (fractions)]
-    import os
     import sys
     if len(sys.argv) < 2:
         sys.exit("usage: python -m topo_agent.sam photo.jpg [noun phrase | x,y]")
