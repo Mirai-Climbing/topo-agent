@@ -1,0 +1,7 @@
+# Training env (CUDA). Export pins ExecuTorch 0.6 + torch 2.7 in a separate env.
+torch
+torchvision
+ultralytics>=8.4
+opencv-python
+pillow
+pyyaml
