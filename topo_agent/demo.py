@@ -84,6 +84,17 @@ def draw(jpeg, tap, holds, label):
     return img
 
 
+def parse_tap(text):
+    """--tap "x,y" as fractions (0-1) from the top left, or exit with a message."""
+    try:
+        x, y = (float(v) for v in text.split(","))
+    except ValueError:
+        sys.exit(f"--tap should be two numbers like 0.42,0.63, not {text!r}")
+    if not (0 <= x <= 1 and 0 <= y <= 1):
+        sys.exit(f"--tap is fractions of the photo (0-1) from the top left, like 0.42,0.63, not {text!r}")
+    return {"x": x, "y": y}
+
+
 def live(env, jpeg, tap):
     """Run SAM 3.1 + Muse Spark: (holds, trace)."""
     from topo_agent.agent import meta_hold_finder
@@ -110,9 +121,12 @@ def main(argv=None, env=None):
     if a.photo:
         if not (a.live and a.tap):
             sys.exit("--photo needs --live and --tap x,y")
-        jpeg = Path(a.photo).read_bytes()
-        x, y = (float(v) for v in a.tap.split(","))
-        tap, name = {"x": x, "y": y}, Path(a.photo).name
+        tap = parse_tap(a.tap)
+        try:
+            jpeg = Path(a.photo).read_bytes()
+        except OSError as e:
+            sys.exit(f"Can't read the photo {a.photo}: {e.strerror or e}")
+        name = Path(a.photo).name
     else:
         jpeg, tap, truth = sample(a.scene)
         name = f"sample wall '{a.scene}'"
