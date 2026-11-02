@@ -512,6 +512,22 @@ identical (the tile is tiny). Kept the close-up; phone latency must be
 attacked elsewhere (selective Spark calls, not smaller payloads).
 Raw rows in `out/bench10noclose/`.
 
+## E29: Tap-miss recovery with a synthetic tap box (2026-11-01, Siho)
+
+YOLO ignores point prompts, so when it missed the tapped hold (17 of 68 cases)
+the pipeline answered [] without calling Spark. `find_with` now appends a
+small tap-centered box (`tap_made` trace flag) that rides through colors,
+hints, table, close-up and answer like any other candidate.
+
+| Method | Recall | Precision | F1 | Mean s |
+|---|---|---|---|---|
+| yolo3s-hist (before) | 50% | 69% | 0.581 | 12.4 |
+| yolo3s-tapfix (after) | 60% | 60% | 0.603 | 17.4 |
+
+All 17 rescued cases return holds; recall matches meta (60%). Extra time is
+the rescued cases now reaching Spark. Submitted as `yolo3s-tapfix` (new
+frontier). Raw traces in `out/bench68tapfix/`.
+
 ## Shared MCP experiment records
 
 These entries were exported from the team MCP server. The server database
