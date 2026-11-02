@@ -1,11 +1,11 @@
 # Submission draft
 
 Draft of the hackathon submission form, for the team to review. Comment on the PR or suggest edits.
-Numbers are updated on Nov 4 from the final 68-route rerun; the video and X links are added when they exist.
+The `meta` real-photo numbers (60% recall, 68% precision) are the leaderboard run on commit `6bc820c`; the agent's default path has not changed since. Siho's final rerun on the merged `main` (`eec00e7`) reproduced `yolo3s-tapfix` (59% / 60% / 17.8 s vs 60% / 60% / 17.4 s), so we keep the leaderboard numbers. The video and X links are added when they exist.
 No passwords, emails or keys go here or in the form. The organizers said there is no private field: judges try the project from the public repo (README "Try it (for judges)") and the video.
 
 提出フォームの下書き。チームで見て、PR にコメントするか、直しを提案してください。
-数字は 11/4 に最終の測り直しで直す。動画と X の URL は、できてから入れる。パスワード、メール、鍵は、ここにもフォームにも書かない。主催者の答え:非公開の欄はない。審査員は公開リポジトリ(README の「Try it (for judges)」)と動画で試す。
+本物の写真の `meta` の数字(見つけた割合 60%、当たりの割合 68%)は、コミット `6bc820c` でのリーダーボードの測定。その後、エージェントのふだんの動きは変わっていない。Siho さんがマージ後の `main`(`eec00e7`)で `yolo3s-tapfix` を測り直し、同じ結果が出た(59% / 60% / 17.8秒、前は 60% / 60% / 17.4秒)ので、リーダーボードの数字を使う。動画と X の URL は、できてから入れる。パスワード、メール、鍵は、ここにもフォームにも書かない。主催者の答え:非公開の欄はない。審査員は公開リポジトリ(README の「Try it (for judges)」)と動画で試す。
 
 ## Choices (proposed)
 

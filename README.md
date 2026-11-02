@@ -114,7 +114,7 @@ All 68 annotated routes on 8 photos from a public indoor climbing dataset (CC BY
 | `yolo3s-tapfix`: three-stage with a YOLO-seg finder, histogram hints and tap-miss recovery (experimental) | 60% | 60% | 0.60 | 17.4 |
 | `meta3`: three-stage, single pass + DINOv2 hints (experimental) | 57% | 57% | 0.57 | 16 |
 
-The three-stage path ([`topo_agent/pipeline.py`](topo_agent/pipeline.py)) matches `meta` recall at about half the time:
+`yolo3s-tapfix`, the three-stage path ([`topo_agent/pipeline.py`](topo_agent/pipeline.py)) with a YOLO finder, matches `meta` recall at about half the time:
 the YOLO finder replaces per-photo SAM segmentation, histogram color hints steady the single Muse Spark pass, and
 tap-miss recovery rescues the 17 cases where detection missed the tapped hold (they used to answer `[]`).
 Precision is still lower than the agent's.
