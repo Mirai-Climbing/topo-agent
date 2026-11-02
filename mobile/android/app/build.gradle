@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace 'io.github.johnrocky.etsamdemo'
+    namespace 'com.miraiclimbing.holddetector'
     compileSdk 35
 
     defaultConfig {
-        applicationId "io.github.johnrocky.etsamdemo"
+        applicationId "com.miraiclimbing.holddetector"
         minSdk 28
         targetSdk 35
         versionCode 1

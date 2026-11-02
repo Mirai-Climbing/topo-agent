@@ -4,6 +4,14 @@ One-shot climbing-hold segmentation on the phone. A YOLO11n-seg model
 (ExecuTorch `.pte`) runs once per photo; every hold mask is drawn immediately.
 No network, no API calls.
 
+## Origin
+
+The app scaffold (ExecuTorch model loading, tap-to-mask activity wiring) is
+adapted from [etsam-demo](https://github.com/john-rocky/executorch-samples/tree/HEAD/etsam-demo)
+by john-rocky. That repo ships no license file. Everything hold-specific —
+YOLO-seg post-processing, camera/gallery flow, offline grouping, direct Spark
+calls — was written for this project.
+
 ## Features
 
 - Sample photo (`gym.jpg` asset, optional) detected at launch
@@ -30,7 +38,7 @@ exact path when it is missing):
 
 ```bash
 adb push ../assets/hold_yolo.pte \
-  /sdcard/Android/data/io.github.johnrocky.etsamdemo/files/hold_yolo.pte
+  /sdcard/Android/data/com.miraiclimbing.holddetector/files/hold_yolo.pte
 ```
 
 The `.pte` must match the ExecuTorch 0.6 runtime. To retrain or re-export, see
