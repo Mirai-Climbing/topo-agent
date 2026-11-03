@@ -12,7 +12,7 @@ No passwords, emails or keys go here or in the form. The organizers said there i
 | Field | Proposal | Why |
 |---|---|---|
 | Team Name | Mirai Climbing | |
-| Team Members | Yuzuki, Siho, Ajay | |
+| Team Members | Yuzuki, Siho, Ajay, Pao | |
 | Track | Indie Developer Track | Startups Track only if Mirai Climbing is run as a company (Yuzuki to confirm) |
 | Problem statement | Build for Your World | Built for climbers in our own gyms: anyone can add a problem with one tap, at any gym |
 | Most Viral Track | X post link, once posted | |
