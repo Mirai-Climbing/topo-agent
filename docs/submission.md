@@ -13,7 +13,7 @@ No passwords, emails or keys go here or in the form. The organizers said there i
 |---|---|---|
 | Team Name | Mirai Climbing | |
 | Team Members | Yuzuki, Siho, Ajay, Pao | |
-| Track | Indie Developer Track | Startups Track only if Mirai Climbing is run as a company (Yuzuki to confirm) |
+| Track | Indie Developer Track | Confirmed by Yuzuki |
 | Problem statement | Build for Your World | Built for climbers in our own gyms: anyone can add a problem with one tap, at any gym |
 | Most Viral Track | X post link, once posted | |
 | How judges try it | README "Try it (for judges)" | No login: replay recorded runs without a key, or run live with a Meta Model API key. The production app needs a login, so the video shows it |
@@ -25,9 +25,9 @@ Climbing apps let climbers find a gym's problems, log their sends and share them
 
 topo-agent makes adding a problem one tap, so any climber at any gym can do it. Take a photo of the wall and tap one hold. SAM 3.1 outlines every hold on the wall, and a Muse Spark agent picks only the holds that belong to the same problem. The app shows what the agent did, the climber can add or remove holds, and the result is saved as a shared problem in Mirai Climbing, our climbing app, so nobody has to mark the same problem twice.
 
-Because the problem is outlined, not just colored, it also helps climbers who can't tell hold colors apart: red-green color vision deficiency affects up to one man in twelve (about one in twenty in Japan).
+Because the problem is outlined, not just colored, it also helps climbers who can't tell hold colors apart: red-green color vision deficiency affects up to one man in twelve (men of Northern European descent; about one in twenty in Japan).
 
-Results so far: on drawn test walls, 99% recall and 100% precision (tape problems: 14% with a color filter, 100% with the agent). On 68 routes in real gym photos, 60% recall and 68% precision; the agent still stops too early on dense walls, and every experiment is logged in the repo.
+Results so far: on drawn test walls, 99% recall and 100% precision (tape problems: 14% with a color filter, 100% with the agent). On 68 routes in real gym photos, 60% recall and 68% precision; the agent still stops too early on dense walls, and every experiment is logged in the repo. We also trained a small YOLO model that replaces SAM: the same recall in about half the time, less precise for now, and it also runs offline on a phone.
 
 Mirai Climbing existed before the hackathon. The topo agent, its evaluation and its integration into the app were built during the hackathon; pre-hackathon code is kept only as a baseline (tag `pre-hackathon`).
 
@@ -54,4 +54,4 @@ Picking the holds of one problem by color alone fails in the cases that matter: 
 
 ## Survey questions
 
-The form also asks about the team's experience with Meta Model API (ratings, biggest obstacle, comparison with other models). Yuzuki answers these when submitting; tell Yuzuki if you want to add anything, for example the obstacles you hit.
+The form also asks about the team's experience with Meta Model API (ratings, biggest obstacle, comparison with other models). Siho submits the form as the team's Representative, using Yuzuki's answers to these (shared on Discord); tell Siho or Yuzuki if you want to add anything, for example the obstacles you hit.
