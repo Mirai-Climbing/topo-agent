@@ -1,7 +1,7 @@
 # Submission draft
 
 Draft of the hackathon submission form, for the team to review. Comment on the PR or suggest edits.
-The `meta` real-photo numbers (60% recall, 68% precision) are the leaderboard run on commit `6bc820c`; the agent's default path has not changed since. Siho's final rerun on the merged `main` (`eec00e7`) reproduced `yolo3s-tapfix` (59% / 60% / 17.8 s vs 60% / 60% / 17.4 s), so we keep the leaderboard numbers. The video and X links are added when they exist.
+The `meta` real-photo numbers (60% recall, 68% precision) are the leaderboard run on commit `6bc820c`; the agent's default path has not changed since. Siho's final rerun on the merged `main` (`eec00e7`) reproduced `yolo3s-tapfix` (59% / 60% / 17.8 s vs 60% / 60% / 17.4 s), so we keep the leaderboard numbers. The video link is in; the X link is added when the post exists.
 No passwords, emails or keys go here or in the form. The organizers said there is no private field: judges try the project from the public repo (README "Try it (for judges)") and the video.
 
 提出フォームの下書き。チームで見て、PR にコメントするか、直しを提案してください。
@@ -37,7 +37,7 @@ https://github.com/Mirai-Climbing/topo-agent
 
 ## 3-Minute Demo Video
 
-(YouTube link; script in [demo-video.md](demo-video.md))
+https://youtu.be/3dhX3NPePSI (script in [demo-video.md](demo-video.md))
 
 ## Describe your use of Meta products to build the submitted project
 
