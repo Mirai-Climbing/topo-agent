@@ -27,7 +27,7 @@ topo-agent makes adding a problem one tap, so any climber at any gym can do it. 
 
 Because the problem is outlined, not just colored, it also helps climbers who can't tell hold colors apart: red-green color vision deficiency affects up to one man in twelve (men of Northern European descent; about one in twenty in Japan).
 
-Results so far: on drawn test walls, 99% recall and 100% precision (tape problems: 14% with a color filter, 100% with the agent). On 68 routes in real gym photos, 60% recall and 68% precision; the agent still stops too early on dense walls, and every experiment is logged in the repo. We also trained a small YOLO model that replaces SAM: the same recall in about half the time, less precise for now, and it also runs offline on a phone.
+Results so far: on drawn test walls, 99% recall and 100% precision (tape problems: 14% with a color filter, 100% with the agent). On 68 routes in real gym photos, 60% recall and 68% precision; the agent still stops too early on dense walls, and every experiment is logged in the repo. We also trained a small YOLO model that replaces SAM: the same recall in about half the time, less precise for now, and the YOLO model also runs offline on Android (ExecuTorch); choosing the problem still uses Muse Spark.
 
 Mirai Climbing existed before the hackathon. The topo agent, its evaluation and its integration into the app were built during the hackathon; pre-hackathon code is kept only as a baseline (tag `pre-hackathon`).
 
